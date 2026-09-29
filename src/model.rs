@@ -5,6 +5,8 @@
 //! - Bookkeeping entries: no `uuid`, keyed by `sessionId` (ai-title, cost-state, last-prompt, ...).
 //!   Later occurrences supersede earlier ones.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -52,6 +54,12 @@ pub struct ConvEntry {
     pub content: Option<Value>,
     #[serde(default)]
     pub is_meta: bool,
+    /// Byte span (start, len) of this entry's source line; filled by the session
+    /// loader so truncated content can be lazily re-read from disk.
+    #[serde(skip)]
+    pub src_start: u64,
+    #[serde(skip)]
+    pub src_len: u64,
 }
 
 impl ConvEntry {
@@ -74,6 +82,37 @@ pub struct CostState {
     pub total_lines_added: u64,
     #[serde(default)]
     pub total_lines_removed: u64,
+    // Same casing quirk as totalCostUSD: the file says "totalAPIDuration".
+    #[serde(default, rename = "totalAPIDuration")]
+    pub total_api_duration: u64,
+    /// Time spent executing tools, in ms.
+    #[serde(default)]
+    pub total_tool_duration: u64,
+    /// Session start, epoch ms.
+    #[serde(default)]
+    pub start_time: Option<i64>,
+    /// Per-model token/cost breakdown, keyed by model id.
+    #[serde(default)]
+    pub model_usage: HashMap<String, ModelUsage>,
+}
+
+/// One model's slice of `cost-state.modelUsage`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // mirrors the wire format; not every field is displayed yet
+pub struct ModelUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub web_search_requests: u64,
+    #[serde(default, rename = "costUSD")]
+    pub cost_usd: f64,
 }
 
 /// Sidecar `subagents/agent-<id>.meta.json`.

@@ -85,11 +85,10 @@ fn scan_project(dir: &Path) -> ProjectEntry {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "jsonl") {
-                if let Some(meta) = SessionMeta::tail_scan(&path) {
+            if path.extension().is_some_and(|e| e == "jsonl")
+                && let Some(meta) = SessionMeta::tail_scan(&path) {
                     sessions.push(meta);
                 }
-            }
         }
     }
     sessions.sort_by(|a, b| b.mtime.cmp(&a.mtime));
@@ -247,15 +246,12 @@ fn first_human_prompt(path: &Path) -> Option<String> {
         if inspected > 200 {
             break; // a prompt should appear early; don't crawl a 48 MB file
         }
-        if let RawLine::Conversation(entry) = line {
-            if entry.entry_type == "user" && !entry.is_meta {
-                if let Some(text) = entry.message.as_ref().and_then(extract_message_text) {
-                    if !text.trim().is_empty() && !text.trim_start().starts_with('<') {
+        if let RawLine::Conversation(entry) = line
+            && entry.entry_type == "user" && !entry.is_meta
+                && let Some(text) = entry.message.as_ref().and_then(extract_message_text)
+                    && !text.trim().is_empty() && !text.trim_start().starts_with('<') {
                         return Some(text);
                     }
-                }
-            }
-        }
     }
     None
 }
@@ -327,14 +323,22 @@ mod tests {
                 r#"{"type":"ai-title","aiTitle":"Old title","sessionId":"s1"}"#,
                 r#"{"uuid":"u1","type":"user","cwd":"/tmp/proj","message":{"role":"user","content":"hello"}}"#,
                 r#"{"type":"ai-title","aiTitle":"New title","sessionId":"s1"}"#,
-                r#"{"type":"cost-state","sessionId":"s1","totalCostUSD":1.25,"totalDuration":60000,"totalLinesAdded":3,"totalLinesRemoved":1}"#,
+                r#"{"type":"cost-state","sessionId":"s1","totalCostUSD":1.25,"totalDuration":60000,"totalLinesAdded":3,"totalLinesRemoved":1,"totalAPIDuration":40000,"totalToolDuration":5000,"startTime":1789000000000,"modelUsage":{"claude-fable-5":{"inputTokens":100,"outputTokens":50,"cacheReadInputTokens":2000,"cacheCreationInputTokens":300,"webSearchRequests":0,"costUSD":1.0}}}"#,
             ],
         );
         let meta = SessionMeta::tail_scan(&path).unwrap();
         assert_eq!(meta.title, "New title");
         assert_eq!(meta.title_source, TitleSource::AiTitle);
         assert_eq!(meta.cwd.as_deref(), Some("/tmp/proj"));
-        assert!((meta.cost.unwrap().total_cost_usd - 1.25).abs() < f64::EPSILON);
+        let cost = meta.cost.unwrap();
+        assert!((cost.total_cost_usd - 1.25).abs() < f64::EPSILON);
+        assert_eq!(cost.total_api_duration, 40000);
+        assert_eq!(cost.total_tool_duration, 5000);
+        assert_eq!(cost.start_time, Some(1789000000000));
+        let mu = &cost.model_usage["claude-fable-5"];
+        assert_eq!(mu.input_tokens, 100);
+        assert_eq!(mu.cache_read_input_tokens, 2000);
+        assert!((mu.cost_usd - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Focus};
 
-use super::{relative_time, truncate, window};
+use super::{format_duration_ms, relative_time, truncate, window};
 
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let [left, right] =
@@ -72,6 +72,8 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
     let title = if app.filter_input || !app.filter.is_empty() {
         format!(" Sessions /{}{} ", app.filter, if app.filter_input { "▌" } else { "" })
+    } else if app.sort != crate::app::SessionSort::Mtime {
+        format!(" Sessions ↓{} ", app.sort.label())
     } else {
         " Sessions ".to_string()
     };
@@ -105,14 +107,26 @@ fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
             .as_ref()
             .map(|c| format!("${:.2}", c.total_cost_usd))
             .unwrap_or_else(|| "-".into());
+        let duration = session
+            .cost
+            .as_ref()
+            .map(|c| format_duration_ms(c.total_duration))
+            .unwrap_or_else(|| "-".into());
         let right = format!(
-            " {:>9} {:>8} {:>9} ⚡{}",
+            " {:>9} {:>8} {:>6} {:>9} ⚡{}",
             relative_time(session.mtime),
             cost,
+            duration,
             humansize::format_size(session.size, humansize::DECIMAL),
             session.subagent_count
         );
-        let title_width = inner_width.saturating_sub(right.chars().count() + 1);
+        // Liveness glyph: ● thinking/working, ▶ attached & waiting for input.
+        let (glyph, glyph_color) = match app.activity(&session.id, session.mtime) {
+            crate::app::Activity::Working => ("● ", Color::Yellow),
+            crate::app::Activity::AwaitingInput => ("▶ ", Color::Green),
+            crate::app::Activity::Idle => ("  ", Color::Reset),
+        };
+        let title_width = inner_width.saturating_sub(right.chars().count() + 3);
         let selected = pos == app.selected_session;
         let base = if selected {
             Style::default().bg(Color::Rgb(50, 50, 70)).add_modifier(Modifier::BOLD)
@@ -120,6 +134,7 @@ fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
             Style::default()
         };
         lines.push(Line::from(vec![
+            Span::styled(glyph, base.fg(glyph_color)),
             Span::styled(
                 format!("{:<w$}", truncate(&session.title, title_width), w = title_width),
                 base,

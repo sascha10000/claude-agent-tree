@@ -18,6 +18,13 @@ pub struct AgentNode {
     pub finished: Option<Timestamp>,
     /// First/last index of this agent's own events in the merged timeline.
     pub event_range: Option<(usize, usize)>,
+    /// From the spawn's tool result: the model the agent actually ran on.
+    pub resolved_model: Option<String>,
+    /// Spawn prompt (capped copy from the spawn record).
+    pub prompt: String,
+    /// Path to the agent's /tmp output transcript, if reported.
+    pub output_file: Option<String>,
+    pub is_async: bool,
     pub children: Vec<AgentNode>,
 }
 
@@ -31,6 +38,10 @@ impl AgentNode {
             started: None,
             finished: None,
             event_range: None,
+            resolved_model: None,
+            prompt: String::new(),
+            output_file: None,
+            is_async: false,
             children: Vec::new(),
         }
     }
@@ -92,11 +103,21 @@ pub fn build_agent_tree(
                     .map(|m| m.agent_type.clone())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "agent".into()),
-                description: t.meta.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+                description: t
+                    .meta
+                    .as_ref()
+                    .map(|m| m.description.clone())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| spawn.map(|s| s.description.clone()))
+                    .unwrap_or_default(),
                 status,
                 started,
                 finished: if status == ToolStatus::Pending { None } else { finished },
                 event_range: own_range,
+                resolved_model: spawn.and_then(|s| s.resolved_model.clone()),
+                prompt: spawn.map(|s| s.prompt.clone()).unwrap_or_default(),
+                output_file: spawn.and_then(|s| s.output_file.clone()),
+                is_async: spawn.is_some_and(|s| s.is_async),
                 children: Vec::new(),
             },
         ));
@@ -140,21 +161,39 @@ pub struct FlatAgentRow {
     pub agent_type: String,
     pub description: String,
     pub status: ToolStatus,
+    pub started: Option<Timestamp>,
+    pub finished: Option<Timestamp>,
     pub duration: Option<jiff::SignedDuration>,
     pub event_range: Option<(usize, usize)>,
+    pub resolved_model: Option<String>,
+    pub prompt: String,
+    pub output_file: Option<String>,
+    pub is_async: bool,
+}
+
+impl FlatAgentRow {
+    fn from_node(node: &AgentNode, prefix: String) -> Self {
+        Self {
+            prefix,
+            agent_id: node.agent_id.clone(),
+            agent_type: node.agent_type.clone(),
+            description: node.description.clone(),
+            status: node.status,
+            started: node.started,
+            finished: node.finished,
+            duration: node.duration(),
+            event_range: node.event_range,
+            resolved_model: node.resolved_model.clone(),
+            prompt: node.prompt.clone(),
+            output_file: node.output_file.clone(),
+            is_async: node.is_async,
+        }
+    }
 }
 
 /// Flatten the tree into rows with box-drawing prefixes for the graph pane.
 pub fn flatten(root: &AgentNode) -> Vec<FlatAgentRow> {
-    let mut rows = vec![FlatAgentRow {
-        prefix: String::new(),
-        agent_id: None,
-        agent_type: root.agent_type.clone(),
-        description: root.description.clone(),
-        status: root.status,
-        duration: root.duration(),
-        event_range: root.event_range,
-    }];
+    let mut rows = vec![FlatAgentRow::from_node(root, String::new())];
     flatten_into(&root.children, "", &mut rows);
     rows
 }
@@ -162,15 +201,10 @@ pub fn flatten(root: &AgentNode) -> Vec<FlatAgentRow> {
 fn flatten_into(children: &[AgentNode], indent: &str, rows: &mut Vec<FlatAgentRow>) {
     for (i, child) in children.iter().enumerate() {
         let last = i == children.len() - 1;
-        rows.push(FlatAgentRow {
-            prefix: format!("{indent}{}", if last { "└─" } else { "├─" }),
-            agent_id: child.agent_id.clone(),
-            agent_type: child.agent_type.clone(),
-            description: child.description.clone(),
-            status: child.status,
-            duration: child.duration(),
-            event_range: child.event_range,
-        });
+        rows.push(FlatAgentRow::from_node(
+            child,
+            format!("{indent}{}", if last { "└─" } else { "├─" }),
+        ));
         let next_indent = format!("{indent}{}", if last { "  " } else { "│ " });
         flatten_into(&child.children, &next_indent, rows);
     }

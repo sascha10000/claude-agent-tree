@@ -1,0 +1,115 @@
+//! Top-level draw: layout split, view dispatch, status bar.
+
+mod browse;
+mod detail;
+
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+
+use crate::app::{App, View};
+
+pub fn draw(frame: &mut Frame, app: &App) {
+    let [main, status] =
+        *Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area())
+    else {
+        return;
+    };
+    match app.view {
+        View::Browse => browse::draw(frame, app, main),
+        View::Detail => detail::draw(frame, app, main),
+    }
+    draw_statusbar(frame, app, status);
+}
+
+fn draw_statusbar(frame: &mut Frame, app: &App, area: Rect) {
+    let mut spans: Vec<Span> = Vec::new();
+    if let Some(msg) = &app.status_msg {
+        spans.push(Span::styled(msg.clone(), Style::default().fg(Color::Red)));
+    } else {
+        match app.view {
+            View::Browse => {
+                let sessions: usize = app.index.projects.iter().map(|p| p.sessions.len()).sum();
+                spans.push(Span::raw(format!(
+                    " {} projects · {} sessions",
+                    app.index.projects.len(),
+                    sessions
+                )));
+            }
+            View::Detail => {
+                if let Some(session) = &app.loaded {
+                    spans.push(Span::raw(format!(
+                        " {} · {} events · {} agents",
+                        session.meta.title,
+                        session.timeline.len(),
+                        app.agent_rows.len().saturating_sub(1)
+                    )));
+                    if let Some(cost) = &session.cost {
+                        spans.push(Span::raw(format!(
+                            " · ${:.2} · +{}/-{} lines",
+                            cost.total_cost_usd, cost.total_lines_added, cost.total_lines_removed
+                        )));
+                    }
+                    if session.parse_errors > 0 {
+                        spans.push(Span::styled(
+                            format!(" · ⚠ {} parse errors", session.parse_errors),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    spans.push(Span::styled(
+        if app.watching { " · ● watching" } else { " · ○ no watch (r = refresh)" },
+        Style::default().fg(if app.watching { Color::Green } else { Color::DarkGray }),
+    ));
+    let hints = match app.view {
+        View::Browse => "  j/k move · enter open · / filter · r refresh · q quit ",
+        View::Detail => "  j/k move · tab pane · enter jump · esc back · q quit ",
+    };
+    spans.push(Span::styled(hints, Style::default().fg(Color::DarkGray)));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Visible slice `[start, start+height)` keeping `selected` centered-ish.
+pub fn window(selected: usize, len: usize, height: usize) -> std::ops::Range<usize> {
+    if len == 0 || height == 0 {
+        return 0..0;
+    }
+    let half = height / 2;
+    let start = selected.saturating_sub(half).min(len.saturating_sub(height));
+    start..(start + height).min(len)
+}
+
+pub fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+pub fn relative_time(t: std::time::SystemTime) -> String {
+    let elapsed = t.elapsed().unwrap_or_default().as_secs();
+    match elapsed {
+        0..=59 => format!("{elapsed}s ago"),
+        60..=3599 => format!("{}m ago", elapsed / 60),
+        3600..=86399 => format!("{}h ago", elapsed / 3600),
+        _ => format!("{}d ago", elapsed / 86400),
+    }
+}
+
+pub fn format_duration(d: jiff::SignedDuration) -> String {
+    let secs = d.as_secs().max(0);
+    if secs >= 3600 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}

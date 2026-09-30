@@ -1,4 +1,4 @@
-//! Embedded terminal: runs `claude --resume` on a PTY and keeps a vt100
+//! Embedded terminal: runs `claude` (resumed or new) on a PTY and keeps a vt100
 //! screen model that the UI renders as a pane. The child stays alive when the
 //! user detaches (Ctrl-q) and is killed when the session/app is dropped.
 
@@ -23,10 +23,12 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    /// Spawn `claude --resume <id>` in `cwd` on a fresh PTY. A reader thread
-    /// feeds the vt100 parser and pokes the event loop for redraws.
+    /// Spawn `claude <args>` in `cwd` on a fresh PTY; `session_id` tags the
+    /// exit event. A reader thread feeds the vt100 parser and pokes the event
+    /// loop for redraws.
     pub fn spawn(
         session_id: String,
+        args: &[&str],
         cwd: &Path,
         rows: u16,
         cols: u16,
@@ -39,7 +41,7 @@ impl PtySession {
             pixel_height: 0,
         })?;
         let mut cmd = CommandBuilder::new("claude");
-        cmd.args(["--resume", &session_id]);
+        cmd.args(args);
         cmd.cwd(cwd);
         let child = pty.slave.spawn_command(cmd)?;
         let killer = child.clone_killer();

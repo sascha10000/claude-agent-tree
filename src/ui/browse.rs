@@ -29,34 +29,30 @@ fn border_style(focused: bool) -> Style {
 }
 
 fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
+    let title = if app.project_filter_input || !app.project_filter.is_empty() {
+        format!(
+            " Projects /{}{} ",
+            app.project_filter,
+            if app.project_filter_input { "▌" } else { "" }
+        )
+    } else {
+        " Projects ".to_string()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Projects ")
+        .title(title)
         .border_style(border_style(app.focus == Focus::Projects));
     let inner_height = area.height.saturating_sub(2) as usize;
     let inner_width = area.width.saturating_sub(2) as usize;
-    let range = window(app.selected_project, app.index.projects.len(), inner_height);
+    let visible = app.visible_projects();
+    let selected_pos = visible.iter().position(|&i| i == app.selected_project).unwrap_or(0);
+    let range = window(selected_pos, visible.len(), inner_height);
 
-    let home = std::env::var("HOME").unwrap_or_default();
     let mut lines = Vec::new();
-    for i in range {
+    for &i in &visible[range] {
         let project = &app.index.projects[i];
-        let name = project.display_path.replace(&home, "~");
-        // Show the tail of the path — the discriminating part.
-        let shown: String = if name.chars().count() > inner_width.saturating_sub(5) {
-            let tail: String = name
-                .chars()
-                .rev()
-                .take(inner_width.saturating_sub(6))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            format!("…{tail}")
-        } else {
-            name
-        };
-        let text = format!("{shown} ({})", project.sessions.len());
+        let count = format!(" ({})", project.sessions.len());
+        let name = truncate(project.name(), inner_width.saturating_sub(count.chars().count()));
         let mut style = Style::default();
         if project.sessions.is_empty() {
             style = style.fg(Color::DarkGray);
@@ -64,7 +60,7 @@ fn draw_projects(frame: &mut Frame, app: &App, area: Rect) {
         if i == app.selected_project {
             style = style.bg(Color::Rgb(50, 50, 70)).add_modifier(Modifier::BOLD);
         }
-        lines.push(Line::from(Span::styled(text, style)));
+        lines.push(Line::from(Span::styled(format!("{name}{count}"), style)));
     }
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
@@ -77,9 +73,18 @@ fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         " Sessions ".to_string()
     };
+    // The project list shows names only; the full path lives up here.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = app
+        .index
+        .projects
+        .get(app.selected_project)
+        .map(|p| format!(" {} ", p.display_path.replacen(&home, "~", 1)))
+        .unwrap_or_default();
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
+        .title_top(Line::from(Span::styled(path, Style::default().fg(Color::DarkGray))).right_aligned())
         .border_style(border_style(app.focus == Focus::Sessions));
     let inner_height = area.height.saturating_sub(2) as usize;
     let inner_width = area.width.saturating_sub(2) as usize;

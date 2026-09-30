@@ -51,6 +51,28 @@ pub struct ProjectEntry {
     pub sessions: Vec<SessionMeta>,
 }
 
+impl ProjectEntry {
+    /// Last path component (`~/workspace/projects/foo` → `foo`) for lists.
+    pub fn name(&self) -> &str {
+        Path::new(&self.display_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&self.display_path)
+    }
+
+    /// The directory claude runs in for this project: a recorded session
+    /// `cwd` (exact), else the de-mangled dir name (lossy: `-` is ambiguous),
+    /// whichever exists on disk.
+    pub fn working_dir(&self) -> Option<PathBuf> {
+        self.sessions
+            .iter()
+            .filter_map(|s| s.cwd.as_deref())
+            .chain(std::iter::once(self.display_path.as_str()))
+            .map(PathBuf::from)
+            .find(|p| p.is_dir())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ProjectIndex {
     pub root: PathBuf,
@@ -320,6 +342,23 @@ mod tests {
             writeln!(f, "{line}").unwrap();
         }
         path
+    }
+
+    #[test]
+    fn project_name_and_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("my-proj");
+        fs::create_dir(&real).unwrap();
+        let mut project = ProjectEntry {
+            dir: PathBuf::from("/unused"),
+            display_path: real.to_string_lossy().into_owned(),
+            sessions: Vec::new(),
+        };
+        assert_eq!(project.name(), "my-proj");
+        // No sessions: falls back to display_path when it exists.
+        assert_eq!(project.working_dir(), Some(real.clone()));
+        project.display_path = "/does/not/exist".into();
+        assert_eq!(project.working_dir(), None);
     }
 
     #[test]

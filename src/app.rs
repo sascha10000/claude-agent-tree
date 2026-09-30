@@ -111,6 +111,9 @@ pub struct App {
     /// Session-list filter; `filter_input` = the `/` prompt is capturing keys.
     pub filter: String,
     pub filter_input: bool,
+    /// Project-list filter (`/` with the Projects pane focused).
+    pub project_filter: String,
+    pub project_filter_input: bool,
     pub watching: bool,
     pub should_quit: bool,
     pub status_msg: Option<String>,
@@ -153,6 +156,8 @@ impl App {
             selected_agent: 0,
             filter: String::new(),
             filter_input: false,
+            project_filter: String::new(),
+            project_filter_input: false,
             watching,
             should_quit: false,
             status_msg: None,
@@ -217,6 +222,49 @@ impl App {
         }
     }
 
+    /// Indices into `index.projects` whose name matches the project filter.
+    /// `selected_project` stays a raw index; navigation walks this list.
+    pub fn visible_projects(&self) -> Vec<usize> {
+        let needle = self.project_filter.to_lowercase();
+        self.index
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| needle.is_empty() || p.name().to_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Move the project selection within the filtered list (`delta` rows, or
+    /// to the first/last visible one via `isize::MIN`/`isize::MAX`).
+    fn step_project(&mut self, delta: isize) {
+        let visible = self.visible_projects();
+        if visible.is_empty() {
+            return;
+        }
+        let pos = visible.iter().position(|&i| i == self.selected_project).unwrap_or(0);
+        let next = match delta {
+            isize::MIN => 0,
+            isize::MAX => visible.len() - 1,
+            d => step(pos, d, visible.len()),
+        };
+        if visible[next] != self.selected_project {
+            self.selected_project = visible[next];
+            self.selected_session = 0;
+        }
+    }
+
+    /// Keep the selection on a visible project after the filter changed.
+    fn snap_project_to_filter(&mut self) {
+        let visible = self.visible_projects();
+        if !visible.contains(&self.selected_project)
+            && let Some(&first) = visible.first()
+        {
+            self.selected_project = first;
+            self.selected_session = 0;
+        }
+    }
+
     /// Indices into the selected project's session list that match the filter,
     /// ordered by the active sort (stable, so mtime stays the tiebreaker).
     pub fn visible_sessions(&self) -> Vec<usize> {
@@ -259,6 +307,22 @@ impl App {
         }
         if !matches!(self.overlay, Overlay::None) {
             self.handle_overlay_key(key);
+            return;
+        }
+        if self.project_filter_input {
+            match key.code {
+                KeyCode::Esc => {
+                    self.project_filter.clear();
+                    self.project_filter_input = false;
+                }
+                KeyCode::Enter => self.project_filter_input = false,
+                KeyCode::Backspace => {
+                    self.project_filter.pop();
+                }
+                KeyCode::Char(c) => self.project_filter.push(c),
+                _ => {}
+            }
+            self.snap_project_to_filter();
             return;
         }
         if self.filter_input {
@@ -386,6 +450,7 @@ impl App {
             return;
         };
         self.selected_project = project_pos;
+        self.project_filter.clear();
         self.filter.clear();
         self.filter_input = false;
         let visible = self.visible_sessions();
@@ -398,30 +463,27 @@ impl App {
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) {
-        let projects = self.index.projects.len();
         let sessions = self.visible_sessions().len();
         match key.code {
-            KeyCode::Char('/') => {
-                self.filter_input = true;
-                self.focus = Focus::Sessions;
-            }
-            KeyCode::Char('j') | KeyCode::Down => match self.focus {
-                Focus::Projects => {
-                    self.selected_project = step(self.selected_project, 1, projects);
-                    self.selected_session = 0;
+            // `/` filters whichever list has focus.
+            KeyCode::Char('/') => match self.focus {
+                Focus::Projects => self.project_filter_input = true,
+                _ => {
+                    self.filter_input = true;
+                    self.focus = Focus::Sessions;
                 }
+            },
+            KeyCode::Char('j') | KeyCode::Down => match self.focus {
+                Focus::Projects => self.step_project(1),
                 _ => self.selected_session = step(self.selected_session, 1, sessions),
             },
             KeyCode::Char('k') | KeyCode::Up => match self.focus {
-                Focus::Projects => {
-                    self.selected_project = step(self.selected_project, -1, projects);
-                    self.selected_session = 0;
-                }
+                Focus::Projects => self.step_project(-1),
                 _ => self.selected_session = step(self.selected_session, -1, sessions),
             },
             KeyCode::Char('g') => self.select_first(),
             KeyCode::Char('G') => match self.focus {
-                Focus::Projects => self.selected_project = projects.saturating_sub(1),
+                Focus::Projects => self.step_project(isize::MAX),
                 _ => self.selected_session = sessions.saturating_sub(1),
             },
             KeyCode::Enter | KeyCode::Char('l') => match self.focus {
@@ -429,6 +491,7 @@ impl App {
                 _ => self.open_selected_session(),
             },
             KeyCode::Char('R') => self.request_resume(),
+            KeyCode::Char('n') => self.new_session(),
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             KeyCode::Char('s') => self.cycle_sort(),
             KeyCode::Char('a') => self.overlay = Overlay::Analytics { scroll: 0 },
@@ -443,6 +506,8 @@ impl App {
                     } else {
                         self.focus = Focus::Projects;
                     }
+                } else if !self.project_filter.is_empty() {
+                    self.project_filter.clear();
                 }
             }
             KeyCode::Tab => {
@@ -609,10 +674,7 @@ impl App {
 
     fn select_first(&mut self) {
         match self.focus {
-            Focus::Projects => {
-                self.selected_project = 0;
-                self.selected_session = 0;
-            }
+            Focus::Projects => self.step_project(isize::MIN),
             _ => self.selected_session = 0,
         }
     }
@@ -719,17 +781,35 @@ impl App {
             self.status_msg = Some("no working directory known for this session".into());
             return;
         };
+        self.spawn_claude(id.clone(), &["--resume", &id], &cwd);
+    }
+
+    /// `n` in Browse: start a fresh `claude` in the selected project's directory.
+    /// We choose the session id up front (`--session-id`), so the terminal is
+    /// keyed by the real id and indicators/`R`/Detail pick it up once claude
+    /// writes the transcript.
+    fn new_session(&mut self) {
+        let Some(project) = self.index.projects.get(self.selected_project) else { return };
+        let Some(cwd) = project.working_dir() else {
+            self.status_msg = Some("project directory not found on disk".into());
+            return;
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        self.spawn_claude(id.clone(), &["--session-id", &id], &cwd);
+    }
+
+    fn spawn_claude(&mut self, id: String, args: &[&str], cwd: &Path) {
         let Some(tx) = self.tx.clone() else {
-            self.status_msg = Some("resume needs the interactive event loop".into());
+            self.status_msg = Some("embedded terminal needs the interactive event loop".into());
             return;
         };
         let (cols, rows) = self.term_size();
-        match crate::term::PtySession::spawn(id.clone(), &cwd, rows, cols, tx) {
+        match crate::term::PtySession::spawn(id.clone(), args, cwd, rows, cols, tx) {
             Ok(pty) => {
                 self.ptys.insert(id.clone(), pty);
                 self.open_terminal(id);
             }
-            Err(e) => self.status_msg = Some(format!("resume failed: {e}")),
+            Err(e) => self.status_msg = Some(format!("starting claude failed: {e}")),
         }
     }
 
@@ -883,6 +963,7 @@ impl App {
         }
         self.selected_project =
             self.selected_project.min(self.index.projects.len().saturating_sub(1));
+        self.snap_project_to_filter();
         if let Some(id) = selected_id {
             let visible = self.visible_sessions();
             if let Some(pos) = visible
@@ -957,6 +1038,48 @@ mod tests {
     }
 
     #[test]
+    fn project_filter_matches_names_and_moves_selection() {
+        let project = |path: &str| crate::index::ProjectEntry {
+            dir: PathBuf::from(path),
+            display_path: path.into(),
+            sessions: Vec::new(),
+        };
+        let index = ProjectIndex {
+            root: PathBuf::from("/"),
+            projects: vec![
+                project("/work/alpha"),
+                project("/work/beta"),
+                project("/work/alphabet"),
+            ],
+        };
+        let mut app = App::new(index, false);
+        app.focus = Focus::Projects;
+        app.selected_project = 1; // beta
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(app.project_filter_input);
+        assert!(!app.filter_input, "session filter stays untouched");
+        // "work" is only in the hidden path part, so it must not match.
+        for c in "work".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(app.visible_projects().is_empty());
+        for _ in 0..4 {
+            app.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "alph".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.visible_projects(), vec![0, 2]);
+        assert_eq!(app.selected_project, 0, "hidden selection snaps to first match");
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('j'))); // skips hidden beta
+        assert_eq!(app.selected_project, 2);
+        app.handle_key(key(KeyCode::Esc)); // clears the project filter
+        assert!(app.project_filter.is_empty());
+        assert_eq!(app.visible_projects().len(), 3);
+    }
+
+    #[test]
     fn quit_and_navigation_on_empty_index_do_not_panic() {
         let mut app = app_with_empty_index();
         app.handle_key(key(KeyCode::Char('j')));
@@ -970,6 +1093,7 @@ mod tests {
     #[test]
     fn filter_input_captures_keys() {
         let mut app = app_with_empty_index();
+        app.focus = Focus::Sessions; // `/` on Projects filters projects instead
         app.handle_key(key(KeyCode::Char('/')));
         assert!(app.filter_input);
         app.handle_key(key(KeyCode::Char('q'))); // must filter, not quit

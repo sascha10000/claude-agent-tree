@@ -113,6 +113,7 @@ mod tests {
             cost: None,
             cwd: None,
             subagent_count: 0,
+            subagent_mtime: None,
         }
     }
 

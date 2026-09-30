@@ -27,6 +27,9 @@ pub enum View {
 pub enum Activity {
     /// Transcript written to seconds ago: claude is thinking/working.
     Working,
+    /// Main transcript quiet but a subagent transcript is being written: the
+    /// main agent is waiting on its subagents, not on the user.
+    SubagentsWorking,
     /// An embedded terminal is attached but quiet: finished, likely waiting
     /// for input.
     AwaitingInput,
@@ -777,16 +780,21 @@ impl App {
         }
     }
 
-    /// Coarse liveness for indicators; `mtime` is the transcript's mtime.
-    pub fn activity(&self, session_id: &str, mtime: std::time::SystemTime) -> Activity {
-        let busy = mtime.elapsed().map(|d| d < ACTIVITY_WINDOW).unwrap_or(false)
-            || self
-                .ptys
-                .get(session_id)
-                .is_some_and(|p| p.output_within(std::time::Duration::from_secs(2)));
-        if busy {
+    /// Coarse liveness for indicators, from transcript mtimes + attached PTY.
+    pub fn activity(&self, meta: &crate::index::SessionMeta) -> Activity {
+        let fresh = |t: std::time::SystemTime| {
+            t.elapsed().map(|d| d < ACTIVITY_WINDOW).unwrap_or(false)
+        };
+        let pty = self.ptys.get(&meta.id);
+        if fresh(meta.mtime)
+            || pty.is_some_and(|p| p.output_within(std::time::Duration::from_secs(2)))
+        {
             Activity::Working
-        } else if self.ptys.contains_key(session_id) {
+        } else if meta.subagent_mtime.is_some_and(fresh) {
+            // Checked before AwaitingInput: with background agents the main
+            // prompt is idle, but the session is still busy.
+            Activity::SubagentsWorking
+        } else if pty.is_some() {
             Activity::AwaitingInput
         } else {
             Activity::Idle
@@ -991,6 +999,7 @@ mod tests {
                     cost: None,
                     cwd: None,
                     subagent_count: 0,
+                    subagent_mtime: None,
                 }],
             }],
         };
@@ -1020,6 +1029,7 @@ mod tests {
             }),
             cwd: None,
             subagent_count: 0,
+            subagent_mtime: None,
         };
         let index = ProjectIndex {
             root: PathBuf::new(),
@@ -1063,6 +1073,7 @@ mod tests {
             cost: None,
             cwd: None,
             subagent_count: 0,
+            subagent_mtime: None,
         };
         let index = ProjectIndex {
             root: PathBuf::new(),
@@ -1117,6 +1128,7 @@ mod tests {
             cost: None,
             cwd: None,
             subagent_count: 0,
+            subagent_mtime: None,
         };
         let mut app = app_with_empty_index();
         app.loaded = Some(LoadedSession::load(meta).unwrap());
@@ -1154,6 +1166,7 @@ mod tests {
             cost: None,
             cwd: None,
             subagent_count: 0,
+            subagent_mtime: None,
         };
         let mut app = app_with_empty_index();
         app.loaded = Some(LoadedSession::load(meta).unwrap());
@@ -1221,6 +1234,7 @@ mod tests {
             cost: None,
             cwd: None,
             subagent_count: 0,
+            subagent_mtime: None,
         };
         let mut app = app_with_empty_index();
         let session = LoadedSession::load(meta.clone()).unwrap();
@@ -1261,9 +1275,25 @@ mod tests {
     fn activity_reflects_mtime() {
         use std::time::SystemTime;
         let app = app_with_empty_index();
-        assert_eq!(app.activity("x", SystemTime::now()), Activity::Working);
+        let mut meta = crate::index::SessionMeta {
+            id: "x".into(),
+            path: PathBuf::from("/tmp/x.jsonl"),
+            title: "t".into(),
+            title_source: crate::index::TitleSource::SessionId,
+            mtime: SystemTime::now(),
+            size: 0,
+            cost: None,
+            cwd: None,
+            subagent_count: 0,
+            subagent_mtime: None,
+        };
+        assert_eq!(app.activity(&meta), Activity::Working);
         // Quiet and unattached = idle (AwaitingInput needs a live pty).
-        assert_eq!(app.activity("x", SystemTime::UNIX_EPOCH), Activity::Idle);
+        meta.mtime = SystemTime::UNIX_EPOCH;
+        assert_eq!(app.activity(&meta), Activity::Idle);
+        // Quiet main transcript, busy subagent: waiting on the subagent.
+        meta.subagent_mtime = Some(SystemTime::now());
+        assert_eq!(app.activity(&meta), Activity::SubagentsWorking);
     }
 
     #[test]

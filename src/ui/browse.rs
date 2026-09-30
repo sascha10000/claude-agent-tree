@@ -120,9 +120,10 @@ fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
             humansize::format_size(session.size, humansize::DECIMAL),
             session.subagent_count
         );
-        // Liveness glyph: ● thinking/working, ▶ attached & waiting for input.
-        let (glyph, glyph_color) = match app.activity(&session.id, session.mtime) {
+        // Liveness glyph: ● working, ⑂ subagents working, ▶ waiting for input.
+        let (glyph, glyph_color) = match app.activity(session) {
             crate::app::Activity::Working => ("● ", Color::Yellow),
+            crate::app::Activity::SubagentsWorking => ("⑂ ", Color::Yellow),
             crate::app::Activity::AwaitingInput => ("▶ ", Color::Green),
             crate::app::Activity::Idle => ("  ", Color::Reset),
         };

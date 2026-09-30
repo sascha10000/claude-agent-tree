@@ -37,6 +37,9 @@ pub struct SessionMeta {
     pub cost: Option<CostState>,
     pub cwd: Option<String>,
     pub subagent_count: usize,
+    /// Newest mtime among subagent transcripts; subagents write to their own
+    /// files, so the main transcript goes quiet while they run.
+    pub subagent_mtime: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +130,7 @@ impl SessionMeta {
             .or_else(|| found.slug.clone().map(|s| (s, TitleSource::Slug)))
             .unwrap_or_else(|| (id.clone(), TitleSource::SessionId));
 
-        let subagent_count = count_subagents(path, &id);
+        let (subagent_count, subagent_mtime) = scan_subagents(path, &id);
 
         Some(Self {
             id,
@@ -139,6 +142,7 @@ impl SessionMeta {
             cost: found.cost,
             cwd: found.cwd,
             subagent_count,
+            subagent_mtime,
         })
     }
 }
@@ -281,22 +285,27 @@ fn sanitize_title(title: &str) -> String {
     result
 }
 
-fn count_subagents(session_path: &Path, session_id: &str) -> usize {
+/// Subagent transcript count and the newest of their mtimes.
+fn scan_subagents(session_path: &Path, session_id: &str) -> (usize, Option<SystemTime>) {
     let dir = match session_path.parent() {
         Some(p) => p.join(session_id).join("subagents"),
-        None => return 0,
+        None => return (0, None),
     };
-    match fs::read_dir(dir) {
-        Ok(entries) => entries
-            .flatten()
-            .filter(|e| {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                name.starts_with("agent-") && name.ends_with(".jsonl")
-            })
-            .count(),
-        Err(_) => 0,
+    let Ok(entries) = fs::read_dir(dir) else { return (0, None) };
+    let mut count = 0;
+    let mut newest: Option<SystemTime> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("agent-") && name.ends_with(".jsonl")) {
+            continue;
+        }
+        count += 1;
+        if let Ok(m) = entry.metadata().and_then(|m| m.modified()) {
+            newest = Some(newest.map_or(m, |n| n.max(m)));
+        }
     }
+    (count, newest)
 }
 
 #[cfg(test)]
@@ -384,5 +393,6 @@ mod tests {
         fs::write(sub.join("agent-abc.meta.json"), "{}").unwrap();
         let meta = SessionMeta::tail_scan(&path).unwrap();
         assert_eq!(meta.subagent_count, 1);
+        assert!(meta.subagent_mtime.is_some());
     }
 }

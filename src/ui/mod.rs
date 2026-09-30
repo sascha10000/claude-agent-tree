@@ -86,20 +86,20 @@ fn draw_statusbar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// ` · ● working` / ` · ▶ awaits input` for the statusbar; empty when idle.
-/// Uses the freshest mtime the index knows for the session.
+/// ` · ● working` / ` · ⑂ subagents working` / ` · ▶ awaits input` for the
+/// statusbar; empty when idle or unknown.
 fn activity_span(app: &App, session_id: &str) -> Span<'static> {
-    let mtime = app
-        .index
-        .projects
-        .iter()
-        .flat_map(|p| &p.sessions)
-        .find(|s| s.id == session_id)
-        .map(|s| s.mtime)
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-    match app.activity(session_id, mtime) {
+    let Some(meta) =
+        app.index.projects.iter().flat_map(|p| &p.sessions).find(|s| s.id == session_id)
+    else {
+        return Span::raw("");
+    };
+    match app.activity(meta) {
         Activity::Working => {
             Span::styled(" · ● working", Style::default().fg(Color::Yellow))
+        }
+        Activity::SubagentsWorking => {
+            Span::styled(" · ⑂ subagents working", Style::default().fg(Color::Yellow))
         }
         Activity::AwaitingInput => {
             Span::styled(" · ▶ awaits input", Style::default().fg(Color::Green))

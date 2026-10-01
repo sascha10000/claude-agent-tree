@@ -78,7 +78,7 @@ fn draw_statusbar(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(if app.watching { Color::Green } else { Color::DarkGray }),
     ));
     let hints = match app.view {
-        View::Browse => "  j/k move · enter open · / filter · s sort · a stats · f fleet · n new · R resume · ? help ",
+        View::Browse => "  j/k move · enter open · / filter · s sort · a stats · A active · f fleet · n new · R resume · ? help ",
         View::Detail => "  / search · e error · T think · o full · c cost · t lanes · x export · R resume · ? help ",
         View::Terminal => "  keys go to claude · ctrl-q detach (keeps running) ",
     };

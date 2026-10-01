@@ -3,6 +3,7 @@ mod analytics;
 mod app;
 mod export;
 mod index;
+mod live;
 mod model;
 mod parser;
 mod session;
@@ -117,6 +118,8 @@ fn handle_event(app: &mut App, event: AppEvent) {
     match event {
         AppEvent::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => {
             app.handle_key(key);
+            // Project selection may have moved: rebuild the live graph.
+            app.sync_live(false);
         }
         AppEvent::Input(Event::Resize(cols, rows)) => {
             // Embedded terminals track the pane size (frame minus statusbar).

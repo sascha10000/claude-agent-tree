@@ -36,6 +36,23 @@ pub enum Activity {
     Idle,
 }
 
+/// Project-list marker, aggregated over the project's sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectStatus {
+    /// Some session (or one of its subagents) is writing right now.
+    Active,
+    /// An embedded terminal is attached and quiet.
+    AwaitingInput,
+    /// Touched within `RECENT_PROJECT_WINDOW`, nothing running.
+    Recent,
+    /// Only older sessions.
+    Old,
+    Empty,
+}
+
+/// Projects touched this recently are marked "recent" rather than "old".
+pub const RECENT_PROJECT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// A transcript touched this recently counts as "working".
 pub const ACTIVITY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -114,6 +131,8 @@ pub struct App {
     /// Project-list filter (`/` with the Projects pane focused).
     pub project_filter: String,
     pub project_filter_input: bool,
+    /// `A`: list only projects with something running or awaiting input.
+    pub only_active: bool,
     pub watching: bool,
     pub should_quit: bool,
     pub status_msg: Option<String>,
@@ -140,11 +159,15 @@ pub struct App {
     pub tx: Option<Sender<AppEvent>>,
     /// Session id currently loading on a worker thread.
     pub loading: Option<String>,
+    /// Live agent graph of the selected project (Browse, bottom right).
+    pub live: Vec<crate::live::LiveSession>,
+    /// Project dir `live` was built for; a mismatch triggers a rebuild.
+    pub live_project: Option<PathBuf>,
 }
 
 impl App {
     pub fn new(index: ProjectIndex, watching: bool) -> Self {
-        Self {
+        let mut app = Self {
             index,
             view: View::Browse,
             focus: Focus::Projects,
@@ -158,6 +181,7 @@ impl App {
             filter_input: false,
             project_filter: String::new(),
             project_filter_input: false,
+            only_active: false,
             watching,
             should_quit: false,
             status_msg: None,
@@ -174,7 +198,11 @@ impl App {
             sort: SessionSort::default(),
             tx: None,
             loading: None,
-        }
+            live: Vec::new(),
+            live_project: None,
+        };
+        app.sync_live(true);
+        app
     }
 
     fn event_visible(&self, kind: &EventKind) -> bool {
@@ -231,6 +259,13 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, p)| needle.is_empty() || p.name().to_lowercase().contains(&needle))
+            .filter(|(_, p)| {
+                !self.only_active
+                    || matches!(
+                        self.project_status(p),
+                        ProjectStatus::Active | ProjectStatus::AwaitingInput
+                    )
+            })
             .map(|(i, _)| i)
             .collect()
     }
@@ -495,6 +530,10 @@ impl App {
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             KeyCode::Char('s') => self.cycle_sort(),
             KeyCode::Char('a') => self.overlay = Overlay::Analytics { scroll: 0 },
+            KeyCode::Char('A') => {
+                self.only_active = !self.only_active;
+                self.snap_project_to_filter();
+            }
             KeyCode::Char('f') => self.overlay = Overlay::Fleet { selected: 0 },
             KeyCode::Esc | KeyCode::Char('h') => {
                 // Cheap load cancellation: the stale result is dropped by id.
@@ -860,6 +899,45 @@ impl App {
         }
     }
 
+    /// Rebuild the live agent graph when the selected project changed, or
+    /// unconditionally with `force` (after a rescan: files moved on).
+    pub fn sync_live(&mut self, force: bool) {
+        let project = self.index.projects.get(self.selected_project);
+        let dir = project.map(|p| p.dir.clone());
+        if !force && dir == self.live_project {
+            return;
+        }
+        self.live = project.map(crate::live::snapshot).unwrap_or_default();
+        self.live_project = dir;
+    }
+
+    /// Strongest activity over a project's sessions, for the project list.
+    pub fn project_status(&self, project: &crate::index::ProjectEntry) -> ProjectStatus {
+        let Some(newest) = project.sessions.iter().map(|s| s.mtime).max() else {
+            return ProjectStatus::Empty;
+        };
+        let mut awaiting = false;
+        // Only recent sessions can be active; skips the long tail cheaply.
+        let candidates = project
+            .sessions
+            .iter()
+            .filter(|s| crate::live::is_recent(s) || self.ptys.contains_key(&s.id));
+        for session in candidates {
+            match self.activity(session) {
+                Activity::Working | Activity::SubagentsWorking => return ProjectStatus::Active,
+                Activity::AwaitingInput => awaiting = true,
+                Activity::Idle => {}
+            }
+        }
+        if awaiting {
+            ProjectStatus::AwaitingInput
+        } else if newest.elapsed().is_ok_and(|d| d < RECENT_PROJECT_WINDOW) {
+            ProjectStatus::Recent
+        } else {
+            ProjectStatus::Old
+        }
+    }
+
     /// Coarse liveness for indicators, from transcript mtimes + attached PTY.
     pub fn activity(&self, meta: &crate::index::SessionMeta) -> Activity {
         let fresh = |t: std::time::SystemTime| {
@@ -975,6 +1053,7 @@ impl App {
         }
         self.selected_session =
             self.selected_session.min(self.visible_sessions().len().saturating_sub(1));
+        self.sync_live(true);
     }
 
     /// Incrementally reload the open session (called on fs events and `r`).
@@ -1035,6 +1114,41 @@ mod tests {
 
     fn app_with_empty_index() -> App {
         App::new(ProjectIndex::default(), false)
+    }
+
+    #[test]
+    fn active_toggle_hides_quiet_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = |name: &str, age_secs: u64| {
+            let path = dir.path().join(format!("{name}.jsonl"));
+            std::fs::write(&path, "{}\n").unwrap();
+            let mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
+            crate::index::SessionMeta::tail_scan(&path).unwrap()
+        };
+        let project = |path: &str, sessions| crate::index::ProjectEntry {
+            dir: PathBuf::from(path),
+            display_path: path.into(),
+            sessions,
+        };
+        let index = ProjectIndex {
+            root: PathBuf::from("/"),
+            projects: vec![
+                project("/work/old", vec![session("old", 7200)]),
+                project("/work/live", vec![session("live", 0)]),
+                project("/work/empty", Vec::new()),
+            ],
+        };
+        let mut app = App::new(index, false);
+        app.focus = Focus::Projects;
+        assert_eq!(app.project_status(&app.index.projects[0]), ProjectStatus::Old);
+        app.handle_key(key(KeyCode::Char('A')));
+        assert!(app.only_active);
+        assert_eq!(app.visible_projects(), vec![1]);
+        assert_eq!(app.selected_project, 1, "hidden selection snaps to the active one");
+        assert!(matches!(app.overlay, Overlay::None), "A must not open analytics");
+        app.handle_key(key(KeyCode::Char('A')));
+        assert_eq!(app.visible_projects().len(), 3);
     }
 
     #[test]

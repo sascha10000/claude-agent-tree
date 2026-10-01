@@ -147,6 +147,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             ("s", "cycle sort (mtime/cost/size/duration)"),
             ("a", "analytics across all projects"),
             ("f", "fleet: recently active sessions"),
+            ("A", "only projects running / awaiting input"),
             ("n", "new claude session in the selected project"),
             ("R", "resume session via claude --resume"),
             ("r", "rescan"),

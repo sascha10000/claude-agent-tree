@@ -29,6 +29,7 @@ cargo run --release -- --root <pfad> ...           # alternatives Projekt-Verzei
 | `ctrl-q` | Terminal-Ansicht verlassen — die Session läuft im Hintergrund weiter |
 | `s` | Browse: Sortierung wechseln (mtime/cost/size/duration) |
 | `a` | Browse: Analytics-Overlay (Kosten/Tokens über alle Projekte) |
+| `A` | Browse: nur Projekte mit laufender / wartender Session zeigen (Toggle) |
 | `f` | Browse: Fleet-Overlay (in den letzten 5 min aktive Sessions, enter = hinspringen) |
 | `/` | Browse: Sessions filtern; Detail: Timeline durchsuchen |
 | `n` / `N` | Detail: nächster / voriger Suchtreffer |
@@ -50,6 +51,15 @@ cargo run --release -- --root <pfad> ...           # alternatives Projekt-Verzei
 Session-Liste: `●` gelb = arbeitet gerade (Transcript wird geschrieben) ·
 `▶` grün = angehängtes Terminal ist still — fertig bzw. wartet auf Eingabe.
 
+Projekt-Liste: `●` gelb = eine Session/ein Subagent arbeitet gerade ·
+`▶` grün = wartet auf Eingabe · `○` cyan = in der letzten Stunde aktiv ·
+`·` grau = nur ältere Sessions.
+
+Live-Agents-Panel (Browse, unten rechts): alle in den letzten 5 min aktiven
+Sessions des gewählten Projekts als Baum mit ihren (verschachtelten)
+Subagenten — `●` läuft · `◌` im Tool-Call · `✓` fertig · `⊘` abgebrochen.
+Ältere fertige Agenten werden zu `… +N earlier finished` zusammengefasst.
+
 ## Architektur
 
 - `parser.rs` — toleranter Streaming-JSONL-Reader; eine unvollständige letzte
@@ -70,6 +80,10 @@ Session-Liste: `●` gelb = arbeitet gerade (Transcript wird geschrieben) ·
   bleibt flach, 4/8/16-KB-Caps gelten nur für die Listendarstellung).
 - Kosten (`c`): parst `cost-state` vollständig inkl. `modelUsage`
   (Token/Cache/Kosten pro Modell) und API-/Tool-Dauern.
+- Agents-Pane: unter jedem Agenten eine `↳`-Zeile mit seiner neuesten
+  eigenen Aktion (Tool-Call inkl. Status, Text, Spawn; Thinking nur als
+  Fallback) — laufende Agenten farbig, fertige gedimmt. Wird zur Zeichenzeit
+  aus der Timeline abgeleitet und folgt damit live dem Tail-Reload.
 - Agent-Detail: bei Fokus auf dem Agents-Pane zeigt das Detail-Pane Modell
   (`resolvedModel`), Laufzeit, Prompt und den finalen Report des Agenten
   (letzter Assistant-Text seines Transcripts; Fallback: `outputFile`).
@@ -87,6 +101,12 @@ Session-Liste: `●` gelb = arbeitet gerade (Transcript wird geschrieben) ·
   bleibt ein roher Timeline-Index, Navigation läuft über `visible_events()`.
 - Edit-Diffs: `structuredPatch` aus dem Tool-Result wird als Unified Diff
   gerendert (+grün/−rot, `@@`-Header cyan) statt als JSON.
+- Live-Graph: `src/live.rs::snapshot` liest nur `agent-*.meta.json`
+  (Typ, Beschreibung, `toolUseId`, `spawnDepth`), Transcript-mtimes und die
+  letzte Zeile jedes Subagent-Transcripts (`stop_reason: end_turn` ⇒ fertig).
+  Eltern verschachtelter Agenten: das Transcript eine Ebene höher, das die
+  `toolUseId` enthält. Neuaufbau bei Projektwechsel und jedem Rescan; der
+  Zustand (läuft/wartet) wird beim Zeichnen aus den mtimes abgeleitet.
 - Analytics (`a`) / Fleet (`f`): reine Aggregation über den Index
   (`src/analytics.rs`), kein zusätzliches Datei-I/O.
 - Hintergrund-Laden: `enter` lädt Sessions auf einem Worker-Thread

@@ -147,7 +147,8 @@ fn draw_graph(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(border_style(app.focus == Focus::Graph));
     let inner_height = area.height.saturating_sub(2) as usize;
     let inner_width = area.width.saturating_sub(2) as usize;
-    let range = window(app.selected_agent, app.agent_rows.len(), inner_height);
+    // Two lines per agent: the node, then what it is doing right now.
+    let range = window(app.selected_agent, app.agent_rows.len(), inner_height / 2);
 
     let mut lines = Vec::new();
     for i in range {
@@ -177,8 +178,66 @@ fn draw_graph(frame: &mut Frame, app: &App, area: Rect) {
             style = style.bg(Color::Rgb(50, 50, 70)).add_modifier(Modifier::BOLD);
         }
         lines.push(Line::from(Span::styled(truncate(&text, inner_width), style)));
+
+        // Continue the tree's vertical rules under the node, and open one
+        // for its children (the next row is deeper) so they still connect.
+        let has_children = app
+            .agent_rows
+            .get(i + 1)
+            .is_some_and(|next| next.prefix.chars().count() > row.prefix.chars().count());
+        let rule = format!(
+            "{}{}",
+            row.prefix.replace("├─", "│ ").replace("└─", "  "),
+            if has_children { "│ " } else { "  " }
+        );
+        let latest = app.loaded.as_ref().and_then(|s| latest_activity(&s.timeline, row));
+        let (activity, activity_style) = match latest {
+            // Still running: highlight; finished agents show their last word dimmed.
+            Some(event) if row.status == ToolStatus::Pending || row.agent_id.is_none() => {
+                (timeline_label(event), event_style(&event.kind))
+            }
+            Some(event) => (timeline_label(event), Style::default().fg(Color::DarkGray)),
+            None => ("(no activity yet)".to_string(), Style::default().fg(Color::DarkGray)),
+        };
+        let ts = latest
+            .and_then(|e| e.timestamp)
+            .map(|t| format!("{} ", fmt_local(t)))
+            .unwrap_or_default();
+        let budget = inner_width.saturating_sub(rule.chars().count() + ts.chars().count() + 2);
+        lines.push(Line::from(vec![
+            Span::styled(rule, Style::default().fg(Color::DarkGray)),
+            Span::styled("↳ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(ts, Style::default().fg(Color::DarkGray)),
+            Span::styled(truncate(&activity, budget), activity_style),
+        ]));
     }
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Newest event of this agent itself (not its children): its current tool
+/// call, last text, or spawn. Thinking and system notes are skipped when
+/// anything more concrete exists.
+fn latest_activity<'a>(
+    timeline: &'a [TimelineEvent],
+    row: &crate::agent_tree::FlatAgentRow,
+) -> Option<&'a TimelineEvent> {
+    let (first, last) = row.event_range?;
+    // The range can be one refresh stale; never slice past the timeline.
+    let last = last.min(timeline.len().checked_sub(1)?);
+    let own = timeline.get(first..=last)?
+        .iter()
+        .rev()
+        .filter(|e| e.agent_path.last().map(String::as_str) == row.agent_id.as_deref());
+    let mut fallback = None;
+    for event in own {
+        match event.kind {
+            EventKind::Thinking { .. } | EventKind::SystemNote { .. } => {
+                fallback.get_or_insert(event);
+            }
+            _ => return Some(event),
+        }
+    }
+    fallback
 }
 
 /// Map an agent's lifetime onto `width` cells over `range`. Returns
@@ -413,8 +472,60 @@ fn draw_agent_detail(frame: &mut Frame, app: &App, area: Rect, block: Block) {
 
 #[cfg(test)]
 mod tests {
-    use super::lane_cells;
+    use super::{lane_cells, latest_activity};
+    use crate::agent_tree::FlatAgentRow;
+    use crate::session::{EventKind, TimelineEvent, ToolStatus};
     use jiff::Timestamp;
+
+    fn event(path: &[&str], kind: EventKind) -> TimelineEvent {
+        TimelineEvent {
+            timestamp: None,
+            agent_path: path.iter().map(|s| s.to_string()).collect(),
+            kind,
+            sources: Vec::new(),
+        }
+    }
+
+    fn row(agent_id: Option<&str>, event_range: Option<(usize, usize)>) -> FlatAgentRow {
+        FlatAgentRow {
+            prefix: String::new(),
+            agent_id: agent_id.map(String::from),
+            agent_type: "t".into(),
+            description: String::new(),
+            status: ToolStatus::Pending,
+            started: None,
+            finished: None,
+            duration: None,
+            event_range,
+            resolved_model: None,
+            prompt: String::new(),
+            output_file: None,
+            is_async: false,
+        }
+    }
+
+    #[test]
+    fn latest_activity_is_own_newest_concrete_event() {
+        let text = |t: &str| EventKind::AssistantText { text: t.into() };
+        let timeline = vec![
+            event(&[], text("main says hi")),
+            event(&["a1"], text("working on x")),
+            event(&["a1"], EventKind::Thinking { text: "hmm".into() }),
+            event(&["a1", "a2"], text("child output")),
+        ];
+        let label = |r: &FlatAgentRow| match &latest_activity(&timeline, r).unwrap().kind {
+            EventKind::AssistantText { text } => text.clone(),
+            other => format!("{other:?}"),
+        };
+        // Child events and trailing thinking don't mask the agent's own action.
+        assert_eq!(label(&row(Some("a1"), Some((1, 3)))), "working on x");
+        assert_eq!(label(&row(None, Some((0, 3)))), "main says hi");
+        // Only thinking available ⇒ fall back to it rather than nothing.
+        let thinking_only = vec![event(&["a1"], EventKind::Thinking { text: "hmm".into() })];
+        assert!(latest_activity(&thinking_only, &row(Some("a1"), Some((0, 0)))).is_some());
+        // A stale range past the end must not panic.
+        assert!(latest_activity(&[], &row(Some("a1"), Some((0, 5)))).is_none());
+    }
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()

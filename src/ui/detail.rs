@@ -84,8 +84,10 @@ fn draw_timeline(frame: &mut Frame, app: &App, area: Rect) {
         format!(" Timeline /{}▌ ", app.search)
     } else if !app.search.is_empty() {
         format!(" Timeline /{} ({}) n/N ", app.search, app.search_matches.len())
+    } else if app.newest_first {
+        " Timeline · newest first ".to_string()
     } else {
-        " Timeline ".to_string()
+        " Timeline · oldest first ".to_string()
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -98,7 +100,7 @@ fn draw_timeline(frame: &mut Frame, app: &App, area: Rect) {
     let inner_height = area.height.saturating_sub(2) as usize;
     let inner_width = area.width.saturating_sub(2) as usize;
     // Window over POSITIONS in the visible list; highlight by raw index.
-    let visible = app.visible_events();
+    let visible = app.display_events();
     let selected_pos =
         visible.iter().position(|&i| i == app.selected_event).unwrap_or(0);
     let range = window(selected_pos, visible.len(), inner_height);

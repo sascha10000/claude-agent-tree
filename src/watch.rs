@@ -45,10 +45,12 @@ pub fn spawn_input(tx: Sender<AppEvent>) -> Arc<AtomicBool> {
     suspended
 }
 
-/// Recursive debounced watcher on the projects root. The returned debouncer
+/// Recursive debounced watcher on the projects root (plus `extra_dirs`,
+/// non-recursive). The returned debouncer
 /// must be kept alive for the watch to stay active.
 pub fn spawn_watcher(
     root: PathBuf,
+    extra_dirs: &[PathBuf],
     tx: Sender<AppEvent>,
 ) -> notify::Result<Debouncer<notify::RecommendedWatcher>> {
     let mut debouncer = new_debouncer(
@@ -63,5 +65,9 @@ pub fn spawn_watcher(
         },
     )?;
     debouncer.watcher().watch(&root, RecursiveMode::Recursive)?;
+    for dir in extra_dirs {
+        // Optional sources (hook event log): a failure must not kill the watch.
+        let _ = debouncer.watcher().watch(dir, RecursiveMode::NonRecursive);
+    }
     Ok(debouncer)
 }

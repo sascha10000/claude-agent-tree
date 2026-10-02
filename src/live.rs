@@ -73,12 +73,13 @@ pub struct LiveSession {
     pub agents: Vec<LiveAgent>,
 }
 
-/// Recent sessions of `project` (newest first) with their subagent trees.
-pub fn snapshot(project: &ProjectEntry) -> Vec<LiveSession> {
+/// Recent sessions of `project` (newest first) with their subagent trees,
+/// plus any session `also_live` vouches for (hooks: open but quiet).
+pub fn snapshot(project: &ProjectEntry, also_live: impl Fn(&SessionMeta) -> bool) -> Vec<LiveSession> {
     project
         .sessions
         .iter()
-        .filter(|s| is_recent(s))
+        .filter(|s| is_recent(s) || also_live(s))
         .map(|s| LiveSession { session_id: s.id.clone(), agents: subagent_tree(s) })
         .collect()
 }

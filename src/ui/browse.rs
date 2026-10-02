@@ -155,6 +155,7 @@ fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
             crate::app::Activity::Working => ("● ", Color::Yellow),
             crate::app::Activity::SubagentsWorking => ("⑂ ", Color::Yellow),
             crate::app::Activity::AwaitingInput => ("▶ ", Color::Green),
+            crate::app::Activity::NeedsPermission => ("⚠ ", Color::Red),
             crate::app::Activity::Idle => ("  ", Color::Reset),
         };
         let title_width = inner_width.saturating_sub(right.chars().count() + 3);
@@ -176,10 +177,11 @@ fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Project-list marker: ● running · ▶ awaits input · ○ touched within the
+/// Project-list marker: ⚠ needs permission · ● running · ▶ awaits input · ○ touched within the
 /// hour · · older.
 fn project_glyph(status: ProjectStatus) -> (&'static str, Color) {
     match status {
+        ProjectStatus::NeedsAttention => ("⚠ ", Color::Red),
         ProjectStatus::Active => ("● ", Color::Yellow),
         ProjectStatus::AwaitingInput => ("▶ ", Color::Green),
         ProjectStatus::Recent => ("○ ", Color::Cyan),
@@ -211,14 +213,24 @@ fn draw_live(frame: &mut Frame, app: &App, area: Rect, lines: Vec<Line<'static>>
     if running + waiting > 0 {
         title = format!(" Live agents · {running} running · {waiting} waiting ");
     }
-    let busy = running > 0
-        || app.live.iter().any(|ls| session_meta(app, &ls.session_id).is_some_and(|m| {
-            matches!(app.activity(m), Activity::Working | Activity::SubagentsWorking)
-        }));
+    let activities: Vec<Activity> = app
+        .live
+        .iter()
+        .filter_map(|ls| session_meta(app, &ls.session_id).map(|m| app.activity(m)))
+        .collect();
+    let border = if activities.contains(&Activity::NeedsPermission) {
+        Color::Red
+    } else if running > 0
+        || activities.iter().any(|a| matches!(a, Activity::Working | Activity::SubagentsWorking))
+    {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(Style::default().fg(if busy { Color::Yellow } else { Color::DarkGray }));
+        .border_style(Style::default().fg(border));
     // Keep the newest (bottom) rows when the graph overflows.
     let inner_height = area.height.saturating_sub(2) as usize;
     let skip = lines.len().saturating_sub(inner_height);
@@ -254,7 +266,13 @@ fn live_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             Activity::Working => ("● ", Color::Yellow, "working"),
             Activity::SubagentsWorking => ("⑂ ", Color::Yellow, "subagents working"),
             Activity::AwaitingInput => ("▶ ", Color::Green, "awaits input"),
+            Activity::NeedsPermission => ("⚠ ", Color::Red, "needs permission"),
             Activity::Idle => ("○ ", Color::DarkGray, "idle"),
+        };
+        // With hooks: what exactly it runs / asks permission for.
+        let label = match app.activity_detail(&meta.id) {
+            Some(detail) => format!("{label}: {}", truncate(detail, 40)),
+            None => label.to_string(),
         };
         let touched = meta.subagent_mtime.map_or(meta.mtime, |s| s.max(meta.mtime));
         lines.push(two_columns(

@@ -77,9 +77,12 @@ fn draw_statusbar(frame: &mut Frame, app: &App, area: Rect) {
         if app.watching { " · ● watching" } else { " · ○ no watch (r = refresh)" },
         Style::default().fg(if app.watching { Color::Green } else { Color::DarkGray }),
     ));
+    if app.hooks.active() {
+        spans.push(Span::styled(" · ⚓ hooks", Style::default().fg(Color::Green)));
+    }
     let hints = match app.view {
-        View::Browse => "  j/k move · enter open · / filter · s sort · a stats · A active · f fleet · n new · R resume · ? help ",
-        View::Detail => "  / search · e error · T think · o full · c cost · t lanes · x export · R resume · ? help ",
+        View::Browse => "  j/k move · enter open · / filter · s sort · a stats · A active · f fleet · n new · R resume · w goto · ? help ",
+        View::Detail => "  / search · e error · T think · o order · O full · c cost · t lanes · x export · R resume · w goto · ? help ",
         View::Terminal => "  keys go to claude · ctrl-q detach (keeps running) ",
     };
     spans.push(Span::styled(hints, Style::default().fg(Color::DarkGray)));
@@ -104,6 +107,10 @@ fn activity_span(app: &App, session_id: &str) -> Span<'static> {
         Activity::AwaitingInput => {
             Span::styled(" · ▶ awaits input", Style::default().fg(Color::Green))
         }
+        Activity::NeedsPermission => Span::styled(
+            format!(" · ⚠ needs permission: {}", app.activity_detail(session_id).unwrap_or("?")),
+            Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD),
+        ),
         Activity::Idle => Span::raw(""),
     }
 }

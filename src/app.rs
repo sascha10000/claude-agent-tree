@@ -30,15 +30,26 @@ pub enum Activity {
     /// Main transcript quiet but a subagent transcript is being written: the
     /// main agent is waiting on its subagents, not on the user.
     SubagentsWorking,
-    /// An embedded terminal is attached but quiet: finished, likely waiting
-    /// for input.
+    /// A permission / question dialog is open (hooks only): blocked on you.
+    NeedsPermission,
+    /// Turn finished and the session is open: waiting for input. Exact with
+    /// hooks; without them only known for embedded terminals.
     AwaitingInput,
     Idle,
 }
 
+/// Without a newer hook event, a "working" claim older than this is stale
+/// (crashed session); a waiting/permission claim lasts longer.
+const HOOK_WORKING_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+const HOOK_WAITING_TTL: std::time::Duration = std::time::Duration::from_secs(12 * 3600);
+/// `tmux list-panes` at most this often.
+const PANES_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Project-list marker, aggregated over the project's sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectStatus {
+    /// A session waits on a permission / question dialog.
+    NeedsAttention,
     /// Some session (or one of its subagents) is writing right now.
     Active,
     /// An embedded terminal is attached and quiet.
@@ -143,6 +154,8 @@ pub struct App {
     pub lanes: bool,
     /// Show extended-thinking events in the timeline (`T`).
     pub show_thinking: bool,
+    /// Timeline order on screen (`o`): true = newest event at the top.
+    pub newest_first: bool,
     /// Timeline search (`/` in Detail); independent of the Browse filter.
     pub search: String,
     pub search_input: bool,
@@ -163,6 +176,13 @@ pub struct App {
     pub live: Vec<crate::live::LiveSession>,
     /// Project dir `live` was built for; a mismatch triggers a rebuild.
     pub live_project: Option<PathBuf>,
+    /// Exact session states from Claude Code hooks (empty when not installed).
+    pub hooks: crate::hooks::HookTracker,
+    /// Query tmux for pane liveness / jumps (off in tests).
+    pub tmux_enabled: bool,
+    /// Cached `tmux list-panes`, refreshed at most every `PANES_TTL`.
+    pub panes: Vec<crate::tmux::Pane>,
+    panes_at: Option<std::time::Instant>,
 }
 
 impl App {
@@ -189,6 +209,7 @@ impl App {
             agent_report_cache: HashMap::new(),
             lanes: false,
             show_thinking: false,
+            newest_first: true,
             search: String::new(),
             search_input: false,
             search_matches: Vec::new(),
@@ -200,6 +221,10 @@ impl App {
             loading: None,
             live: Vec::new(),
             live_project: None,
+            hooks: crate::hooks::HookTracker::default(),
+            tmux_enabled: false,
+            panes: Vec::new(),
+            panes_at: None,
         };
         app.sync_live(true);
         app
@@ -223,7 +248,17 @@ impl App {
             .collect()
     }
 
-    /// Move the timeline selection by `delta` visible steps.
+    /// `visible_events` in on-screen order (top to bottom).
+    pub fn display_events(&self) -> Vec<usize> {
+        let mut visible = self.visible_events();
+        if self.newest_first {
+            visible.reverse();
+        }
+        visible
+    }
+
+    /// Move the timeline selection by `delta` visible steps in SCREEN
+    /// direction (positive = down), whatever the timeline order is.
     fn step_visible(&mut self, delta: isize) {
         let visible = self.visible_events();
         if visible.is_empty() {
@@ -233,6 +268,7 @@ impl App {
             .iter()
             .position(|&i| i >= self.selected_event)
             .unwrap_or(visible.len() - 1);
+        let delta = if self.newest_first { -delta } else { delta };
         self.selected_event = visible[step(pos, delta, visible.len())];
     }
 
@@ -263,7 +299,9 @@ impl App {
                 !self.only_active
                     || matches!(
                         self.project_status(p),
-                        ProjectStatus::Active | ProjectStatus::AwaitingInput
+                        ProjectStatus::NeedsAttention
+                            | ProjectStatus::Active
+                            | ProjectStatus::AwaitingInput
                     )
             })
             .map(|(i, _)| i)
@@ -526,6 +564,16 @@ impl App {
                 _ => self.open_selected_session(),
             },
             KeyCode::Char('R') => self.request_resume(),
+            KeyCode::Char('w') => {
+                let visible = self.visible_sessions();
+                let meta = visible.get(self.selected_session).and_then(|&i| {
+                    self.index.projects.get(self.selected_project)?.sessions.get(i)
+                });
+                if let Some(meta) = meta {
+                    let (id, cwd) = (meta.id.clone(), meta.cwd.clone());
+                    self.jump_to_session(id, cwd);
+                }
+            }
             KeyCode::Char('n') => self.new_session(),
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             KeyCode::Char('s') => self.cycle_sort(),
@@ -572,11 +620,11 @@ impl App {
             KeyCode::PageUp | KeyCode::Char('u') => self.step_visible(-20),
             KeyCode::Char('g') => match self.focus {
                 Focus::Graph => self.selected_agent = 0,
-                _ => self.selected_event = self.visible_events().first().copied().unwrap_or(0),
+                _ => self.selected_event = self.display_events().first().copied().unwrap_or(0),
             },
             KeyCode::Char('G') => match self.focus {
                 Focus::Graph => self.selected_agent = agents.saturating_sub(1),
-                _ => self.selected_event = self.visible_events().last().copied().unwrap_or(0),
+                _ => self.selected_event = self.display_events().last().copied().unwrap_or(0),
             },
             KeyCode::Char('T') => {
                 self.show_thinking = !self.show_thinking;
@@ -593,17 +641,25 @@ impl App {
             KeyCode::Char('N') => self.jump_to_match(false, false),
             KeyCode::Char('e') => self.jump_to_error(),
             KeyCode::Char('c') => self.overlay = Overlay::Cost,
-            KeyCode::Char('o') => self.open_event_overlay(),
+            // The selection is a raw index, so it stays on the same event.
+            KeyCode::Char('o') => self.newest_first = !self.newest_first,
+            KeyCode::Char('O') => self.open_event_overlay(),
             KeyCode::Char('t') => self.lanes = !self.lanes,
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             KeyCode::Char('x') => self.export_loaded(),
             KeyCode::Char('R') => self.resume_loaded(),
+            KeyCode::Char('w') => {
+                if let Some(session) = &self.loaded {
+                    let (id, cwd) = (session.meta.id.clone(), session.meta.cwd.clone());
+                    self.jump_to_session(id, cwd);
+                }
+            }
             KeyCode::Tab => {
                 self.focus =
                     if self.focus == Focus::Timeline { Focus::Graph } else { Focus::Timeline };
             }
             // Spawn events keep their advertised cross-jump; other timeline
-            // events open the fullscreen view (`o` always opens it).
+            // events open the fullscreen view (`O` always opens it).
             KeyCode::Enter => match self.focus {
                 Focus::Timeline if !self.selected_is_spawn() => self.open_event_overlay(),
                 _ => self.cross_jump(),
@@ -649,32 +705,25 @@ impl App {
     }
 
     /// `n`/`N` (and Enter in the search prompt, with `include_current`):
-    /// wrap-around jump through `search_matches`.
-    fn jump_to_match(&mut self, forward: bool, include_current: bool) {
+    /// wrap-around jump through `search_matches`. `down` is screen direction.
+    fn jump_to_match(&mut self, down: bool, include_current: bool) {
         if self.search_matches.is_empty() {
             if !self.search.is_empty() {
                 self.status_msg = Some(format!("no match for '{}'", self.search));
             }
             return;
         }
-        let cur = self.selected_event;
-        self.selected_event = if forward {
-            self.search_matches
-                .iter()
-                .copied()
-                .find(|&i| if include_current { i >= cur } else { i > cur })
-                .unwrap_or(self.search_matches[0])
-        } else {
-            self.search_matches
-                .iter()
-                .rev()
-                .copied()
-                .find(|&i| i < cur)
-                .unwrap_or(*self.search_matches.last().expect("non-empty"))
-        };
+        let target = next_wrapping(
+            &self.search_matches,
+            self.selected_event,
+            down != self.newest_first,
+            include_current,
+        );
+        self.selected_event = target;
     }
 
-    /// `e`: next visible event with an Error/Denied status, wrapping.
+    /// `e`: next visible event (downward on screen) with an Error/Denied
+    /// status, wrapping.
     fn jump_to_error(&mut self) {
         let Some(session) = &self.loaded else { return };
         let errors: Vec<usize> = self
@@ -687,12 +736,11 @@ impl App {
                 )
             })
             .collect();
-        let Some(&first) = errors.first() else {
+        if errors.is_empty() {
             self.status_msg = Some("no failed tool calls".into());
             return;
-        };
-        let cur = self.selected_event;
-        self.selected_event = errors.iter().copied().find(|&i| i > cur).unwrap_or(first);
+        }
+        self.selected_event = next_wrapping(&errors, self.selected_event, !self.newest_first, false);
     }
 
     /// With the graph focused, lazily resolve the selected agent's final report
@@ -852,6 +900,84 @@ impl App {
         }
     }
 
+    /// `w`: go to where the session runs — the embedded terminal if we own
+    /// it, else its tmux pane (from hooks, or the unique claude pane in its
+    /// cwd).
+    fn jump_to_session(&mut self, id: String, cwd: Option<String>) {
+        if self.ptys.contains_key(&id) {
+            self.open_terminal(id);
+            return;
+        }
+        self.panes_at = None; // panes move; never jump on stale data
+        self.refresh_panes();
+        let hooked = self.hook_view(&id).and_then(|h| Some((h.tmux_pane.clone()?, h.tmux_socket.clone())));
+        let target = hooked.or_else(|| {
+            let pane = crate::tmux::pane_by_cwd(&self.panes, cwd.as_deref()?)?;
+            Some((pane.id.clone(), None))
+        });
+        let Some((pane, socket)) = target else {
+            self.status_msg = Some(if self.hooks.active() {
+                "session isn't running in a tmux pane".into()
+            } else {
+                "no tmux pane known — install hooks (--install-hooks) for exact tracking".into()
+            });
+            return;
+        };
+        match crate::tmux::focus(socket.as_deref(), &pane) {
+            Ok(()) => {
+                let target = self.panes.iter().find(|p| p.id == pane).map_or(pane.clone(), |p| p.target.clone());
+                self.status_msg = Some(format!("→ tmux {target}"));
+            }
+            Err(e) => self.status_msg = Some(format!("tmux: {e}")),
+        }
+    }
+
+    /// Re-list tmux panes if the cache is older than `PANES_TTL`.
+    pub fn refresh_panes(&mut self) {
+        if !self.tmux_enabled || self.panes_at.is_some_and(|t| t.elapsed() < PANES_TTL) {
+            return;
+        }
+        let socket = self.hooks.sessions.values().find_map(|h| h.tmux_socket.clone());
+        self.panes = crate::tmux::list_panes(None);
+        if self.panes.is_empty() && socket.is_some() {
+            self.panes = crate::tmux::list_panes(socket.as_deref());
+        }
+        self.panes_at = Some(std::time::Instant::now());
+    }
+
+    /// The hook state of a session if it is still believable: not ended, not
+    /// timed out, its tmux pane (if any) still runs claude, and no newer
+    /// session has taken over that pane.
+    pub fn hook_view(&self, id: &str) -> Option<&crate::hooks::HookSession> {
+        use crate::hooks::HookState;
+        let h = self.hooks.sessions.get(id)?;
+        let age = h.at.elapsed().unwrap_or_default();
+        let ttl = if h.state == HookState::Working { HOOK_WORKING_TTL } else { HOOK_WAITING_TTL };
+        if h.state == HookState::Ended || age > ttl {
+            return None;
+        }
+        if let Some(pane) = &h.tmux_pane {
+            if self.tmux_enabled
+                && self.panes_at.is_some()
+                && !self.panes.iter().any(|p| &p.id == pane && p.runs_claude())
+            {
+                return None; // pane closed or claude exited
+            }
+            let superseded = self.hooks.sessions.iter().any(|(other, o)| {
+                other != id && o.tmux_pane.as_ref() == Some(pane) && o.at > h.at
+            });
+            if superseded {
+                return None;
+            }
+        }
+        Some(h)
+    }
+
+    /// What the session is doing per hooks: tool one-liner or prompt text.
+    pub fn activity_detail(&self, id: &str) -> Option<&str> {
+        self.hook_view(id)?.detail.as_deref()
+    }
+
     fn open_terminal(&mut self, id: String) {
         self.term_return = self.view;
         self.term_session = Some(id);
@@ -907,7 +1033,10 @@ impl App {
         if !force && dir == self.live_project {
             return;
         }
-        self.live = project.map(crate::live::snapshot).unwrap_or_default();
+        let live = project
+            .map(|p| crate::live::snapshot(p, |s| self.hook_view(&s.id).is_some()))
+            .unwrap_or_default();
+        self.live = live;
         self.live_project = dir;
     }
 
@@ -921,15 +1050,23 @@ impl App {
         let candidates = project
             .sessions
             .iter()
-            .filter(|s| crate::live::is_recent(s) || self.ptys.contains_key(&s.id));
+            .filter(|s| {
+                crate::live::is_recent(s)
+                    || self.ptys.contains_key(&s.id)
+                    || self.hooks.sessions.contains_key(&s.id)
+            });
+        let mut active = false;
         for session in candidates {
             match self.activity(session) {
-                Activity::Working | Activity::SubagentsWorking => return ProjectStatus::Active,
+                Activity::NeedsPermission => return ProjectStatus::NeedsAttention,
+                Activity::Working | Activity::SubagentsWorking => active = true,
                 Activity::AwaitingInput => awaiting = true,
                 Activity::Idle => {}
             }
         }
-        if awaiting {
+        if active {
+            ProjectStatus::Active
+        } else if awaiting {
             ProjectStatus::AwaitingInput
         } else if newest.elapsed().is_ok_and(|d| d < RECENT_PROJECT_WINDOW) {
             ProjectStatus::Recent
@@ -938,15 +1075,30 @@ impl App {
         }
     }
 
-    /// Coarse liveness for indicators, from transcript mtimes + attached PTY.
+    /// Liveness for indicators: hook state when we have a believable one,
+    /// else transcript mtimes + attached PTY.
     pub fn activity(&self, meta: &crate::index::SessionMeta) -> Activity {
+        use crate::hooks::HookState;
         let fresh = |t: std::time::SystemTime| {
             t.elapsed().map(|d| d < ACTIVITY_WINDOW).unwrap_or(false)
         };
         let pty = self.ptys.get(&meta.id);
-        if fresh(meta.mtime)
-            || pty.is_some_and(|p| p.output_within(std::time::Duration::from_secs(2)))
-        {
+        if pty.is_some_and(|p| p.output_within(std::time::Duration::from_secs(2))) {
+            return Activity::Working;
+        }
+        if let Some(hook) = self.hook_view(&meta.id) {
+            return match hook.state {
+                HookState::NeedsPermission => Activity::NeedsPermission,
+                HookState::Working => Activity::Working,
+                // Background subagents keep running after the main turn ends.
+                _ if meta.subagent_mtime.is_some_and(fresh) => Activity::SubagentsWorking,
+                _ => Activity::AwaitingInput,
+            };
+        }
+        if self.hooks.sessions.get(&meta.id).is_some_and(|h| h.state == HookState::Ended) {
+            return Activity::Idle; // ended: trailing bookkeeping writes don't count
+        }
+        if fresh(meta.mtime) {
             Activity::Working
         } else if meta.subagent_mtime.is_some_and(fresh) {
             // Checked before AwaitingInput: with background agents the main
@@ -998,7 +1150,8 @@ impl App {
         match result {
             Ok(session) => {
                 self.agent_rows = flatten(&session.agent_tree);
-                self.selected_event = 0;
+                // Start at the top of the screen: newest event if newest-first.
+                self.selected_event = if self.newest_first { usize::MAX } else { 0 };
                 self.selected_agent = 0;
                 self.loaded = Some(session);
                 self.snap_selected();
@@ -1053,6 +1206,7 @@ impl App {
         }
         self.selected_session =
             self.selected_session.min(self.visible_sessions().len().saturating_sub(1));
+        self.refresh_panes();
         self.sync_live(true);
     }
 
@@ -1103,6 +1257,18 @@ fn step(current: usize, delta: isize, len: usize) -> usize {
     next.clamp(0, len as isize - 1) as usize
 }
 
+/// Next entry of the ascending, non-empty `sorted` after `cur` (`forward`)
+/// or before it, wrapping around; `include_current` also accepts `cur`.
+fn next_wrapping(sorted: &[usize], cur: usize, forward: bool, include_current: bool) -> usize {
+    let hit = if forward {
+        sorted.iter().copied().find(|&i| if include_current { i >= cur } else { i > cur })
+    } else {
+        sorted.iter().rev().copied().find(|&i| if include_current { i <= cur } else { i < cur })
+    };
+    let wrap = if forward { sorted.first() } else { sorted.last() };
+    hit.or(wrap.copied()).unwrap_or(cur)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1149,6 +1315,48 @@ mod tests {
         assert!(matches!(app.overlay, Overlay::None), "A must not open analytics");
         app.handle_key(key(KeyCode::Char('A')));
         assert_eq!(app.visible_projects().len(), 3);
+    }
+
+    #[test]
+    fn hook_state_overrides_mtime_heuristics() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = |name: &str| {
+            let path = dir.path().join(format!("{name}.jsonl"));
+            std::fs::write(&path, "{}\n").unwrap(); // fresh mtime ⇒ heuristic says Working
+            crate::index::SessionMeta::tail_scan(&path).unwrap()
+        };
+        let (perm, ended, old, new) = (session("perm"), session("ended"), session("old"), session("new"));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let events = dir.path().join("events.jsonl");
+        let line = |id: &str, event: &str, ts: u128, extra: &str| {
+            format!(r#"{{"ts":{ts},"event":"{event}","session_id":"{id}"{extra}}}"#)
+        };
+        std::fs::write(
+            &events,
+            [
+                line("perm", "PermissionRequest", now, r#","tool":"Bash: rm""#),
+                line("ended", "SessionEnd", now, ""),
+                line("old", "Stop", now - 1000, r#","tmux_pane":"%1""#),
+                line("new", "Stop", now, r#","tmux_pane":"%1""#),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let mut app = App::new(ProjectIndex::default(), false);
+        app.hooks = crate::hooks::HookTracker::new(Some(events));
+        assert_eq!(app.activity(&perm), Activity::NeedsPermission);
+        assert_eq!(app.activity_detail("perm"), Some("Bash: rm"));
+        // Ended beats the fresh transcript (trailing bookkeeping writes).
+        assert_eq!(app.activity(&ended), Activity::Idle);
+        // A newer session in the same pane supersedes the old one, whose
+        // hook state is ignored ⇒ heuristic (fresh mtime) applies.
+        assert_eq!(app.activity(&new), Activity::AwaitingInput);
+        assert!(app.hook_view("old").is_none());
+        assert_eq!(app.activity(&old), Activity::Working);
     }
 
     #[test]
@@ -1372,6 +1580,7 @@ mod tests {
         app.loaded = Some(LoadedSession::load(meta).unwrap());
         app.view = View::Detail;
         app.focus = Focus::Timeline;
+        app.newest_first = false;
         assert_eq!(app.visible_events(), vec![0, 2]); // thinking at 1 hidden
         app.handle_key(key(KeyCode::Char('j')));
         assert_eq!(app.selected_event, 2); // skipped the hidden event
@@ -1410,6 +1619,7 @@ mod tests {
         app.loaded = Some(LoadedSession::load(meta).unwrap());
         app.view = View::Detail;
         app.focus = Focus::Timeline;
+        app.newest_first = false; // tests below are written top-down = ascending
         // keep the tempdir alive via leak: the file is fully read already
         std::mem::forget(dir);
         app
@@ -1441,6 +1651,42 @@ mod tests {
         assert_eq!(app.view, View::Detail);
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.view, View::Browse);
+    }
+
+    #[test]
+    fn newest_first_reverses_screen_order_and_navigation() {
+        let mut app = app_with_search_fixture();
+        // timeline: [0]=prompt, [1]=tool call (error), [2]=assistant text
+        app.newest_first = true;
+        assert_eq!(app.display_events(), vec![2, 1, 0]);
+        app.handle_key(key(KeyCode::Char('g'))); // top = newest
+        assert_eq!(app.selected_event, 2);
+        app.handle_key(key(KeyCode::Char('j'))); // down = older
+        assert_eq!(app.selected_event, 1);
+        app.handle_key(key(KeyCode::Char('G'))); // bottom = oldest
+        assert_eq!(app.selected_event, 0);
+        app.handle_key(key(KeyCode::Char('k'))); // up = newer
+        assert_eq!(app.selected_event, 1);
+        // `o` flips the order, keeping the same event selected.
+        app.handle_key(key(KeyCode::Char('o')));
+        assert!(!app.newest_first);
+        assert_eq!(app.display_events(), vec![0, 1, 2]);
+        assert_eq!(app.selected_event, 1);
+        app.handle_key(key(KeyCode::Char('o')));
+        // Search `n` walks downward on screen: newest match first, then older.
+        app.handle_key(key(KeyCode::Char('g')));
+        app.handle_key(key(KeyCode::Char('/')));
+        for c in "needle".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // include current (2, a match)
+        assert_eq!(app.selected_event, 2);
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(app.selected_event, 0);
+        app.handle_key(key(KeyCode::Char('n'))); // wraps to the top
+        assert_eq!(app.selected_event, 2);
+        app.handle_key(key(KeyCode::Char('N'))); // upward, wrapping to the bottom
+        assert_eq!(app.selected_event, 0);
     }
 
     #[test]

@@ -2,12 +2,14 @@ mod agent_tree;
 mod analytics;
 mod app;
 mod export;
+mod hooks;
 mod index;
 mod live;
 mod model;
 mod parser;
 mod session;
 mod term;
+mod tmux;
 mod ui;
 mod watch;
 
@@ -49,6 +51,16 @@ fn parse_root(args: &mut Vec<String>) -> Result<Option<PathBuf>> {
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Hook mode runs inside every claude session: no index scan, never fail.
+    match args.first().map(String::as_str) {
+        Some("--hook") => {
+            hooks::run_hook();
+            return Ok(());
+        }
+        Some("--install-hooks") => return cmd_install_hooks(true),
+        Some("--uninstall-hooks") => return cmd_install_hooks(false),
+        _ => {}
+    }
     let root = projects_root(parse_root(&mut args)?)?;
     match args.first().map(String::as_str) {
         Some("--list") => cmd_list(&root),
@@ -61,7 +73,8 @@ fn main() -> Result<()> {
             cmd_export(&root, id)
         }
         Some(other) => bail!(
-            "unknown argument: {other} (try --list, --dump <id>, --export <id>, --root <path>)"
+            "unknown argument: {other} (try --list, --dump <id>, --export <id>, --root <path>, \
+             --install-hooks, --uninstall-hooks)"
         ),
         None => run_tui(root),
     }
@@ -76,9 +89,18 @@ fn run_tui(root: PathBuf) -> Result<()> {
     let app_tx = tx.clone();
     // Keep the debouncer alive for the lifetime of the loop; a failed watcher
     // degrades to manual refresh via `r`.
-    let watcher = watch::spawn_watcher(root, tx);
+    let events = hooks::events_path();
+    // The hook log's directory must exist to be watched before the first event.
+    if let Some(dir) = events.as_deref().and_then(Path::parent) {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let extra: Vec<PathBuf> = events.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect();
+    let watcher = watch::spawn_watcher(root, &extra, tx);
     let mut app = App::new(index, watcher.is_ok());
     app.tx = Some(app_tx);
+    app.hooks = hooks::HookTracker::new(events);
+    app.tmux_enabled = true;
+    app.refresh_panes();
     if let Err(e) = &watcher {
         app.status_msg = Some(format!("watcher unavailable ({e}) — press r to refresh"));
     }
@@ -127,6 +149,11 @@ fn handle_event(app: &mut App, event: AppEvent) {
         }
         AppEvent::Input(_) => {} // other events: the redraw is enough
         AppEvent::Fs(paths) => {
+            if let Some(events) = app.hooks.path().map(Path::to_path_buf)
+                && paths.iter().any(|p| p == &events)
+            {
+                app.hooks.refresh();
+            }
             if paths.iter().any(|p| app.path_touches_loaded(p)) {
                 app.refresh_loaded();
             }
@@ -240,6 +267,34 @@ fn cmd_dump(root: &Path, id_prefix: &str) -> Result<()> {
             .unwrap_or_else(|| "--:--:--".into());
         let indent = "  ".repeat(event.agent_path.len());
         println!("{ts} {indent}{}", session::event_label(&event.kind));
+    }
+    Ok(())
+}
+
+/// `--install-hooks` / `--uninstall-hooks`: edit ~/.claude/settings.json
+/// (backup alongside); other tools' hooks are left alone.
+fn cmd_install_hooks(install: bool) -> Result<()> {
+    let settings = hooks::settings_path().context("HOME is not set")?;
+    if install {
+        let exe = std::env::current_exe()?.canonicalize()?;
+        let command = hooks::hook_command(&exe);
+        let mut refreshed = false;
+        hooks::edit_settings(&settings, |s| {
+            refreshed = hooks::has_hooks_installed(s);
+            hooks::install_into(s, &command);
+        })?;
+        println!(
+            "{} hooks in {} (backup: settings.json.bak-agent-tree)",
+            if refreshed { "refreshed" } else { "installed" },
+            settings.display()
+        );
+        println!("command: {command}");
+        println!("events → {}", hooks::events_path().map(|p| p.display().to_string()).unwrap_or_default());
+        println!("running claude sessions pick this up on their next start; new ones immediately.");
+    } else {
+        let mut removed = 0;
+        hooks::edit_settings(&settings, |s| removed = hooks::uninstall_from(s))?;
+        println!("removed {removed} hook entries from {}", settings.display());
     }
     Ok(())
 }

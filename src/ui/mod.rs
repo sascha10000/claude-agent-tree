@@ -3,6 +3,7 @@
 mod browse;
 mod detail;
 mod overlay;
+mod tabs;
 mod term;
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -14,11 +15,19 @@ use ratatui::Frame;
 use crate::app::{Activity, App, View};
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    let [main, status] =
-        *Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area())
-    else {
+    // Outside Browse a session tab bar sits on top (Browse already lists them).
+    let tab_rows = if app.view == View::Browse { 0 } else { 1 };
+    let [tab_bar, main, status] = *Layout::vertical([
+        Constraint::Length(tab_rows),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(frame.area()) else {
         return;
     };
+    if tab_rows > 0 {
+        tabs::draw(frame, app, tab_bar);
+    }
     match app.view {
         View::Browse => browse::draw(frame, app, main),
         View::Detail => detail::draw(frame, app, main),
@@ -82,8 +91,8 @@ fn draw_statusbar(frame: &mut Frame, app: &App, area: Rect) {
     }
     let hints = match app.view {
         View::Browse => "  j/k move · enter open · / filter · s sort · a stats · A active · f fleet · n new · R resume · w goto · ? help ",
-        View::Detail => "  / search · e error · T think · o order · O full · c cost · t lanes · x export · R resume · w goto · ? help ",
-        View::Terminal => "  keys go to claude · ctrl-q detach (keeps running) ",
+        View::Detail => "  / search · e error · T think · o order · O full · c cost · t lanes · x export · R resume · w goto · ^n tabs · ? help ",
+        View::Terminal => "  keys go to claude · ctrl-n tabs · ctrl-q detach (keeps running) ",
     };
     spans.push(Span::styled(hints, Style::default().fg(Color::DarkGray)));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

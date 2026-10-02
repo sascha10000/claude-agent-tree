@@ -44,6 +44,19 @@ const HOOK_WORKING_TTL: std::time::Duration = std::time::Duration::from_secs(360
 const HOOK_WAITING_TTL: std::time::Duration = std::time::Duration::from_secs(12 * 3600);
 /// `tmux list-panes` at most this often.
 const PANES_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+/// Rows the Terminal view loses to the tab bar (top) and status line (bottom).
+pub const CHROME_ROWS: u16 = 2;
+
+/// One entry of the session tab bar shown outside Browse.
+#[derive(Debug, Clone)]
+pub struct SessionTab {
+    pub id: String,
+    pub project: String,
+    pub title: String,
+    pub activity: Activity,
+    /// Runs in one of our PTYs: switching opens its terminal, not Detail.
+    pub embedded: bool,
+}
 
 /// Project-list marker, aggregated over the project's sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +182,8 @@ pub struct App {
     pub term_session: Option<String>,
     /// Where Ctrl-q returns to.
     pub term_return: View,
+    /// Session tab bar (Detail/Terminal) has focus: index into `session_tabs()`.
+    pub tabbar: Option<usize>,
     pub sort: SessionSort,
     /// Channel for background workers; None = load synchronously (tests, CLI).
     pub tx: Option<Sender<AppEvent>>,
@@ -218,6 +233,7 @@ impl App {
             ptys: HashMap::new(),
             term_session: None,
             term_return: View::Browse,
+            tabbar: None,
             sort: SessionSort::default(),
             tx: None,
             loading: None,
@@ -374,6 +390,20 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        use crossterm::event::KeyModifiers;
+        // The tab bar sits above everything outside Browse, terminal included:
+        // Ctrl-n is the one chord the embedded claude never sees.
+        if self.tabbar.is_some() {
+            self.handle_tabbar_key(key);
+            return;
+        }
+        if self.view != View::Browse
+            && key.code == KeyCode::Char('n')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.focus_tabbar();
+            return;
+        }
         // The embedded terminal owns every key except the detach chord, so
         // this must run before the global q/r handling and prompts.
         if self.view == View::Terminal {
@@ -999,15 +1029,135 @@ impl App {
     }
 
     fn open_terminal(&mut self, id: String) {
-        self.term_return = self.view;
+        // Terminal → terminal (tab switch) keeps the original return target.
+        if self.view != View::Terminal {
+            self.term_return = self.view;
+        }
         self.term_session = Some(id);
         self.view = View::Terminal;
         self.status_msg = None;
     }
 
-    /// Terminal pane dimensions: the frame minus the status line.
+    /// Terminal pane dimensions: the frame minus tab bar and status line.
     fn term_size(&self) -> (u16, u16) {
-        crossterm::terminal::size().map(|(w, h)| (w, h.saturating_sub(1))).unwrap_or((80, 24))
+        crossterm::terminal::size()
+            .map(|(w, h)| (w, h.saturating_sub(CHROME_ROWS)))
+            .unwrap_or((80, 24))
+    }
+
+    /// The session the current view shows (Detail or Terminal).
+    pub fn current_session_id(&self) -> Option<&str> {
+        match self.view {
+            View::Terminal => self.term_session.as_deref(),
+            View::Detail => self.loaded.as_ref().map(|s| s.meta.id.as_str()),
+            View::Browse => None,
+        }
+    }
+
+    /// Tab bar entries: every running/waiting session across projects, plus
+    /// the one on screen. Ordered by project, then session id, so tabs keep
+    /// their place while statuses change.
+    pub fn session_tabs(&self) -> Vec<SessionTab> {
+        let current = self.current_session_id();
+        let mut tabs: Vec<SessionTab> = Vec::new();
+        for project in &self.index.projects {
+            for meta in &project.sessions {
+                let candidate = crate::live::is_recent(meta)
+                    || self.ptys.contains_key(&meta.id)
+                    || self.hooks.sessions.contains_key(&meta.id)
+                    || current == Some(meta.id.as_str());
+                if !candidate {
+                    continue;
+                }
+                let activity = self.activity(meta);
+                if activity == Activity::Idle && current != Some(meta.id.as_str()) {
+                    continue;
+                }
+                tabs.push(SessionTab {
+                    id: meta.id.clone(),
+                    project: project.name().to_string(),
+                    title: meta.title.clone(),
+                    activity,
+                    embedded: self.ptys.contains_key(&meta.id),
+                });
+            }
+        }
+        // A brand-new embedded session has no transcript (and no index
+        // entry) until its first prompt; it still deserves a tab.
+        for id in self.ptys.keys() {
+            if !tabs.iter().any(|t| &t.id == id) {
+                tabs.push(SessionTab {
+                    id: id.clone(),
+                    project: "new".into(),
+                    title: format!("session {}", &id[..8.min(id.len())]),
+                    activity: Activity::AwaitingInput,
+                    embedded: true,
+                });
+            }
+        }
+        tabs.sort_by(|a, b| (&a.project, &a.id).cmp(&(&b.project, &b.id)));
+        tabs
+    }
+
+    /// Ctrl-n: focus the tab bar on the tab currently shown.
+    fn focus_tabbar(&mut self) {
+        let tabs = self.session_tabs();
+        if tabs.is_empty() {
+            self.status_msg = Some("no running or waiting sessions".into());
+            return;
+        }
+        let current = self.current_session_id();
+        self.tabbar = Some(tabs.iter().position(|t| Some(t.id.as_str()) == current).unwrap_or(0));
+    }
+
+    fn handle_tabbar_key(&mut self, key: KeyEvent) {
+        use crossterm::event::KeyModifiers;
+        let tabs = self.session_tabs();
+        let Some(selected) = self.tabbar else { return };
+        if tabs.is_empty() {
+            self.tabbar = None;
+            return;
+        }
+        // Tabs can vanish while the bar is focused (session went idle).
+        let selected = selected.min(tabs.len() - 1);
+        let ctrl_n = key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            _ if ctrl_n => self.tabbar = None,
+            KeyCode::Esc | KeyCode::Char('q') => self.tabbar = None,
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                self.tabbar = Some((selected + tabs.len() - 1) % tabs.len());
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                self.tabbar = Some((selected + 1) % tabs.len());
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.tabbar = Some(0),
+            KeyCode::End | KeyCode::Char('G') => self.tabbar = Some(tabs.len() - 1),
+            KeyCode::Char(c @ '1'..='9') => {
+                let n = c as usize - '1' as usize;
+                if n < tabs.len() {
+                    self.switch_to_tab(&tabs[n]);
+                }
+            }
+            KeyCode::Enter => self.switch_to_tab(&tabs[selected]),
+            _ => {}
+        }
+    }
+
+    /// Leave the bar and show `tab`: its terminal if embedded, else Detail.
+    fn switch_to_tab(&mut self, tab: &SessionTab) {
+        self.tabbar = None;
+        if tab.embedded {
+            self.open_terminal(tab.id.clone());
+            return;
+        }
+        if self.view == View::Detail && self.current_session_id() == Some(tab.id.as_str()) {
+            return;
+        }
+        let meta = self.index.projects.iter().flat_map(|p| &p.sessions).find(|s| s.id == tab.id);
+        match meta.cloned() {
+            Some(meta) => self.load_session(meta),
+            None => self.status_msg = Some("session not in the index yet — press r".into()),
+        }
     }
 
     fn handle_terminal_key(&mut self, key: KeyEvent) {
@@ -1136,6 +1286,11 @@ impl App {
         let Some(&session_idx) = visible.get(self.selected_session) else { return };
         let Some(project) = self.index.projects.get(self.selected_project) else { return };
         let meta = project.sessions[session_idx].clone();
+        self.load_session(meta);
+    }
+
+    /// Open `meta` in Detail; loads on a worker thread when there is one.
+    fn load_session(&mut self, meta: crate::index::SessionMeta) {
         if self.loading.as_deref() == Some(meta.id.as_str()) {
             return; // already loading this one (Enter mashing)
         }
@@ -1430,6 +1585,96 @@ mod tests {
         assert!(!app.should_quit);
         app.handle_key(key(KeyCode::Char('q')));
         assert!(app.should_quit);
+    }
+
+    /// Two live sessions in projects `b` and `a` (out of order on purpose),
+    /// plus an idle one; `live` has a real transcript so it can be loaded.
+    fn app_with_live_sessions() -> App {
+        use crate::index::{ProjectEntry, SessionMeta, TitleSource};
+        use std::io::Write;
+        use std::time::SystemTime;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, r#"{{"uuid":"u1","type":"user","timestamp":"2026-01-01T10:00:00Z","message":{{"role":"user","content":"hi"}}}}"#).unwrap();
+        drop(f);
+        std::mem::forget(dir);
+        let meta = |id: &str, path: PathBuf, mtime: SystemTime| SessionMeta {
+            id: id.into(),
+            path,
+            title: format!("title {id}"),
+            title_source: TitleSource::SessionId,
+            mtime,
+            size: 0,
+            cost: None,
+            cwd: None,
+            subagent_count: 0,
+            subagent_mtime: None,
+        };
+        let now = SystemTime::now();
+        let index = ProjectIndex {
+            root: PathBuf::new(),
+            projects: vec![
+                ProjectEntry {
+                    dir: PathBuf::from("/b"),
+                    display_path: "/w/b".into(),
+                    sessions: vec![meta("live", path, now)],
+                },
+                ProjectEntry {
+                    dir: PathBuf::from("/a"),
+                    display_path: "/w/a".into(),
+                    sessions: vec![
+                        meta("busy", PathBuf::from("/a/busy.jsonl"), now),
+                        meta("old", PathBuf::from("/a/old.jsonl"), SystemTime::UNIX_EPOCH),
+                    ],
+                },
+            ],
+        };
+        App::new(index, false)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), crossterm::event::KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn session_tabs_list_live_sessions_in_stable_order() {
+        let app = app_with_live_sessions();
+        let ids: Vec<String> = app.session_tabs().into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["busy", "live"]); // by project name; idle "old" left out
+    }
+
+    #[test]
+    fn tab_bar_focus_navigation_and_switch() {
+        let mut app = app_with_live_sessions();
+        app.handle_key(ctrl('n')); // Browse: no tab bar there
+        assert!(app.tabbar.is_none());
+
+        // Terminal view: Ctrl-n must be caught before keys go to the PTY.
+        app.view = View::Terminal;
+        app.handle_key(ctrl('n'));
+        assert_eq!(app.tabbar, Some(0));
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.tabbar, Some(1));
+        app.handle_key(key(KeyCode::Right)); // wraps
+        assert_eq!(app.tabbar, Some(0));
+        app.handle_key(key(KeyCode::Left)); // wraps back
+        assert_eq!(app.tabbar, Some(1));
+        app.handle_key(key(KeyCode::Char('q'))); // closes the bar, never quits
+        assert!(app.tabbar.is_none());
+        assert!(!app.should_quit);
+
+        // `2` switches straight to the second tab: "live", opened in Detail.
+        app.handle_key(ctrl('n'));
+        app.handle_key(key(KeyCode::Char('2')));
+        assert!(app.tabbar.is_none());
+        assert_eq!(app.view, View::Detail);
+        assert_eq!(app.current_session_id(), Some("live"));
+        // Focusing again starts on the tab being shown.
+        app.handle_key(ctrl('n'));
+        assert_eq!(app.tabbar, Some(1));
+        app.handle_key(ctrl('n')); // Ctrl-n toggles it off again
+        assert!(app.tabbar.is_none());
     }
 
     #[test]

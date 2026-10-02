@@ -144,8 +144,8 @@ fn handle_event(app: &mut App, event: AppEvent) {
             app.sync_live(false);
         }
         AppEvent::Input(Event::Resize(cols, rows)) => {
-            // Embedded terminals track the pane size (frame minus statusbar).
-            app.resize_ptys(cols, rows.saturating_sub(1));
+            // Embedded terminals track the pane size (frame minus tab bar and statusbar).
+            app.resize_ptys(cols, rows.saturating_sub(app::CHROME_ROWS));
         }
         AppEvent::Input(_) => {} // other events: the redraw is enough
         AppEvent::Fs(paths) => {

@@ -108,6 +108,7 @@ Laufende Sessions übernehmen neue Hooks erst nach einem Neustart.
 | `R` | Session per `claude --resume` als eingebettetes Terminal öffnen (Browse + Detail) |
 | `w` | zur Session springen: eingebettetes Terminal oder ihr tmux-Pane (Browse + Detail) |
 | `ctrl-q` | Terminal-Ansicht verlassen — die Session läuft im Hintergrund weiter |
+| `ctrl-n` | Detail + Terminal: Session-Tab-Leiste oben fokussieren (alle laufenden/wartenden Sessions mit Status); `←`/`→` wählen, `1`–`9` oder `enter` wechseln, `esc` zurück. Eingebettete Sessions öffnen ihr Terminal, andere die Detail-Ansicht |
 | `s` | Browse: Sortierung wechseln (mtime/cost/size/duration) |
 | `a` | Browse: Analytics-Overlay (Kosten/Tokens über alle Projekte) |
 | `A` | Browse: nur Projekte mit laufender / wartender Session zeigen (Toggle) |

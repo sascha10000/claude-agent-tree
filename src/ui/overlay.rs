@@ -197,6 +197,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             ("enter", "spawn: jump to agent · else fullscreen"),
             ("o", "toggle order: newest ↔ oldest first"),
             ("O", "fullscreen event view (uncapped)"),
+            ("ctrl-n", "session tabs: ←/→ pick · 1-9 / enter switch · esc"),
             ("c", "cost & token breakdown"),
             ("t", "agents as time lanes"),
             ("x", "export session as Markdown"),

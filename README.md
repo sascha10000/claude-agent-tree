@@ -119,6 +119,7 @@ Laufende Sessions übernehmen neue Hooks erst nach einem Neustart.
 | `T` | Detail: Thinking-Blöcke ein-/ausblenden |
 | `x` | Detail: Session als Markdown exportieren (auch CLI `--export`) |
 | `?` | Tastaturhilfe |
+| `q` | beenden; laufen eingebettete `claude`-Sessions, fragt ein Popup nach (`y` = beenden und Sessions schließen, `n`/`esc` = abbrechen) |
 | `esc` / `h` | zurück / Overlay bzw. Suche schließen |
 | `tab` | Pane wechseln; Detail-Pane zeigt bei Agents-Fokus den Agenten |
 | `u`/`d`, PgUp/PgDn | schnell scrollen (Timeline, Vollansicht) |

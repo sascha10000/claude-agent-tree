@@ -120,6 +120,8 @@ pub enum Overlay {
     Analytics { scroll: usize },
     /// Recently active sessions across all projects.
     Fleet { selected: usize },
+    /// `q` while embedded claude sessions run: quitting would kill them.
+    ConfirmQuit { running: usize },
 }
 
 /// A session counts as "active" in the fleet view when written to this recently.
@@ -441,7 +443,7 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('r') => self.reload(),
             _ => match self.view {
                 View::Browse => self.handle_browse_key(key),
@@ -451,8 +453,26 @@ impl App {
         }
     }
 
+    /// `q`: quit right away, unless embedded claude sessions are running —
+    /// dropping their PTYs kills them, so ask first.
+    fn request_quit(&mut self) {
+        match self.ptys.len() {
+            0 => self.should_quit = true,
+            running => self.overlay = Overlay::ConfirmQuit { running },
+        }
+    }
+
     fn handle_overlay_key(&mut self, key: KeyEvent) {
         match &mut self.overlay {
+            // Only an explicit `y` quits: a second stray `q` (or Enter) must
+            // not be what kills the sessions.
+            Overlay::ConfirmQuit { .. } => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.should_quit = true,
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
+                    self.overlay = Overlay::None
+                }
+                _ => {}
+            },
             Overlay::EventDetail { content, scroll } => {
                 let max = content.lines().count().saturating_sub(1);
                 match key.code {
@@ -1409,6 +1429,24 @@ mod tests {
         app.handle_key(key(KeyCode::Char('G')));
         assert!(!app.should_quit);
         app.handle_key(key(KeyCode::Char('q')));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn confirm_quit_needs_explicit_yes() {
+        // Spawning a real PTY needs `claude`; drive the popup directly.
+        let mut app = app_with_empty_index();
+        app.overlay = Overlay::ConfirmQuit { running: 2 };
+        for code in [KeyCode::Char('q'), KeyCode::Enter, KeyCode::Char('j')] {
+            app.handle_key(key(code));
+            assert!(!app.should_quit, "{code:?} must not confirm the quit");
+            app.overlay = Overlay::ConfirmQuit { running: 2 };
+        }
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(!app.should_quit);
+        app.overlay = Overlay::ConfirmQuit { running: 2 };
+        app.handle_key(key(KeyCode::Char('y')));
         assert!(app.should_quit);
     }
 

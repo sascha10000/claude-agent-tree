@@ -20,7 +20,41 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
             draw_analytics(frame, app, *scroll, centered(area, 80, 80))
         }
         Overlay::Fleet { selected } => draw_fleet(frame, app, *selected, centered(area, 84, 60)),
+        Overlay::ConfirmQuit { running } => draw_confirm_quit(frame, *running, area),
     }
+}
+
+fn draw_confirm_quit(frame: &mut Frame, running: usize, area: Rect) {
+    let sessions = if running == 1 { "1 claude session is".to_string() } else { format!("{running} claude sessions are") };
+    let lines = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!(" {sessions} running in this app."),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(" Quitting will close them too."),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" y", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" quit and close   "),
+            Span::styled("n / esc", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" cancel"),
+        ]),
+    ];
+    // Fixed size: the text is short, percentages would waste or clip it.
+    let (w, h) = (48.min(area.width), 7.min(area.height));
+    let rect = Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Quit? ")
+        .border_style(Style::default().fg(Color::Red));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 fn draw_fleet(frame: &mut Frame, app: &App, selected: usize, area: Rect) {

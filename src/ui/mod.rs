@@ -15,8 +15,9 @@ use ratatui::Frame;
 use crate::app::{Activity, App, View};
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    // Outside Browse a session tab bar sits on top (Browse already lists them).
-    let tab_rows = if app.view == View::Browse { 0 } else { 1 };
+    // Outside Browse a session tab bar sits on top (Browse already lists them);
+    // while focused it unfolds into a vertical list, one row per tab.
+    let tab_rows = if app.view == View::Browse { 0 } else { tabs::height(app, frame.area().height) };
     let [tab_bar, main, status] = *Layout::vertical([
         Constraint::Length(tab_rows),
         Constraint::Min(0),

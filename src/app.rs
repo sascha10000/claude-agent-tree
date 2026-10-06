@@ -1208,10 +1208,11 @@ impl App {
         match key.code {
             _ if ctrl_n => self.tabbar = None,
             KeyCode::Esc | KeyCode::Char('q') => self.tabbar = None,
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+            // The focused bar is a vertical list, but ←/→ keep working too.
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
                 self.tabbar = Some((selected + tabs.len() - 1) % tabs.len());
             }
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
                 self.tabbar = Some((selected + 1) % tabs.len());
             }
             KeyCode::Home | KeyCode::Char('g') => self.tabbar = Some(0),
@@ -1808,6 +1809,10 @@ mod tests {
         app.handle_key(key(KeyCode::Right)); // wraps
         assert_eq!(app.tabbar, Some(0));
         app.handle_key(key(KeyCode::Left)); // wraps back
+        assert_eq!(app.tabbar, Some(1));
+        app.handle_key(key(KeyCode::Up)); // the focused bar is a vertical list
+        assert_eq!(app.tabbar, Some(0));
+        app.handle_key(key(KeyCode::Down));
         assert_eq!(app.tabbar, Some(1));
         app.handle_key(key(KeyCode::Char('q'))); // closes the bar, never quits
         assert!(app.tabbar.is_none());

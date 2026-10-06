@@ -119,9 +119,27 @@ fn scan_project(dir: &Path) -> ProjectEntry {
     sessions.sort_by(|a, b| b.mtime.cmp(&a.mtime));
     let display_path = sessions
         .iter()
-        .find_map(|s| s.cwd.clone())
+        .filter_map(|s| s.cwd.as_deref())
+        .find_map(|cwd| launch_dir(cwd, dir))
         .unwrap_or_else(|| demangle_dir_name(dir));
     ProjectEntry { dir: dir.to_path_buf(), display_path, sessions }
+}
+
+/// A session's `cwd` follows the shell, so after a `cd src` it points into a
+/// subfolder. The project dir name is the mangled *launch* dir, so walk up the
+/// `cwd` until an ancestor mangles to that name.
+fn launch_dir(cwd: &str, dir: &Path) -> Option<String> {
+    let mangled = dir.file_name()?.to_string_lossy();
+    Path::new(cwd)
+        .ancestors()
+        .map(|p| p.to_string_lossy())
+        .find(|p| mangle_path(p) == mangled)
+        .map(|p| p.into_owned())
+}
+
+/// Claude Code's project dir naming: every non-alphanumeric char becomes `-`.
+fn mangle_path(path: &str) -> String {
+    path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 /// `-Users-sascha-workspace-projects-foo` → `/Users/sascha/workspace/projects/foo`.
@@ -359,6 +377,14 @@ mod tests {
         assert_eq!(project.working_dir(), Some(real.clone()));
         project.display_path = "/does/not/exist".into();
         assert_eq!(project.working_dir(), None);
+    }
+
+    #[test]
+    fn launch_dir_ignores_later_cd() {
+        let dir = Path::new("/x/-Users-me-my-proj");
+        assert_eq!(launch_dir("/Users/me/my-proj/src", dir).as_deref(), Some("/Users/me/my-proj"));
+        assert_eq!(launch_dir("/Users/me/my-proj", dir).as_deref(), Some("/Users/me/my-proj"));
+        assert_eq!(launch_dir("/Users/me/other", dir), None);
     }
 
     #[test]

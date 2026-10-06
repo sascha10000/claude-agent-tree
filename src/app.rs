@@ -135,6 +135,9 @@ pub enum Overlay {
     Fleet { selected: usize },
     /// `q` while embedded claude sessions run: quitting would kill them.
     ConfirmQuit { running: usize },
+    /// `N`: pick a directory to start a new session in. `selected` indexes
+    /// `dir_candidates(input)`.
+    NewProject { input: String, selected: usize },
 }
 
 /// A session counts as "active" in the fleet view when written to this recently.
@@ -559,6 +562,35 @@ impl App {
                     _ => {}
                 }
             }
+            Overlay::NewProject { input, selected } => {
+                let candidates = dir_candidates(input);
+                match key.code {
+                    KeyCode::Esc => self.overlay = Overlay::None,
+                    KeyCode::Down => *selected = step(*selected, 1, candidates.len()),
+                    KeyCode::Up => *selected = step(*selected, -1, candidates.len()),
+                    // Complete into the highlighted subdirectory.
+                    KeyCode::Tab | KeyCode::Right => {
+                        if let Some(dir) = candidates.get(*selected) {
+                            *input = format!("{}{dir}/", parent_part(input));
+                            *selected = 0;
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        *selected = 0;
+                    }
+                    KeyCode::Char(c) => {
+                        input.push(c);
+                        *selected = 0;
+                    }
+                    KeyCode::Enter => {
+                        let path = expand_tilde(input.trim());
+                        self.overlay = Overlay::None;
+                        self.new_session_in(&path);
+                    }
+                    _ => {}
+                }
+            }
             Overlay::None => {}
         }
     }
@@ -625,6 +657,7 @@ impl App {
                 }
             }
             KeyCode::Char('n') => self.new_session(),
+            KeyCode::Char('N') => self.open_new_project(),
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             KeyCode::Char('s') => self.cycle_sort(),
             KeyCode::Char('a') => self.overlay = Overlay::Analytics { scroll: 0 },
@@ -933,6 +966,57 @@ impl App {
         };
         let id = uuid::Uuid::new_v4().to_string();
         self.spawn_claude(id.clone(), &["--session-id", &id], &cwd);
+    }
+
+    /// `N` in Browse: open the directory picker, seeded with the parent of
+    /// the selected project (siblings are the likeliest new projects).
+    fn open_new_project(&mut self) {
+        let seed = self
+            .index
+            .projects
+            .get(self.selected_project)
+            .and_then(|p| p.working_dir())
+            .and_then(|d| d.parent().map(Path::to_path_buf))
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let mut input = contract_tilde(&seed);
+        if !input.ends_with('/') {
+            input.push('/');
+        }
+        self.overlay = Overlay::NewProject { input, selected: 0 };
+    }
+
+    /// Start a fresh claude in `path`, creating the directory if needed. If
+    /// an indexed project already runs there, select it: the transcript
+    /// lands in that project's dir anyway, so it is the same project.
+    fn new_session_in(&mut self, path: &Path) {
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        let created = !path.exists();
+        if let Err(e) = std::fs::create_dir_all(path) {
+            self.status_msg = Some(format!("creating {} failed: {e}", path.display()));
+            return;
+        }
+        if !path.is_dir() {
+            self.status_msg = Some(format!("{} is not a directory", path.display()));
+            return;
+        }
+        let cwd = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let existing = self.index.projects.iter().position(|p| {
+            p.working_dir().and_then(|d| std::fs::canonicalize(d).ok()).as_deref() == Some(cwd.as_path())
+        });
+        if let Some(pos) = existing {
+            self.selected_project = pos;
+            self.project_filter.clear();
+            self.only_active = false;
+            self.selected_session = 0;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.spawn_claude(id.clone(), &["--session-id", &id], &cwd);
+        if created && self.status_msg.is_none() {
+            self.status_msg = Some(format!("created {}", cwd.display()));
+        }
     }
 
     fn spawn_claude(&mut self, id: String, args: &[&str], cwd: &Path) {
@@ -1424,6 +1508,49 @@ impl App {
     }
 }
 
+/// `~/foo` → `$HOME/foo`; anything else unchanged.
+pub fn expand_tilde(input: &str) -> PathBuf {
+    match (input.strip_prefix('~'), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            PathBuf::from(format!("{}{rest}", home.to_string_lossy()))
+        }
+        _ => PathBuf::from(input),
+    }
+}
+
+/// `$HOME/foo` → `~/foo` for display and editing.
+fn contract_tilde(path: &Path) -> String {
+    let s = path.to_string_lossy().into_owned();
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && s.starts_with(&home) => format!("~{}", &s[home.len()..]),
+        _ => s,
+    }
+}
+
+/// Everything up to and including the last `/` of a picker input.
+fn parent_part(input: &str) -> &str {
+    input.rfind('/').map_or("", |i| &input[..=i])
+}
+
+/// Subdirectories of the input's parent whose name starts with the partial
+/// last component (case-insensitive), sorted. Dot-dirs only when asked for.
+pub fn dir_candidates(input: &str) -> Vec<String> {
+    let parent = parent_part(input);
+    let partial = input[parent.len()..].to_lowercase();
+    let Ok(entries) = std::fs::read_dir(expand_tilde(if parent.is_empty() { "." } else { parent })) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.') || partial.starts_with('.'))
+        .filter(|n| n.to_lowercase().starts_with(&partial))
+        .collect();
+    dirs.sort_by_key(|n| n.to_lowercase());
+    dirs
+}
+
 fn step(current: usize, delta: isize, len: usize) -> usize {
     if len == 0 {
         return 0;
@@ -1451,6 +1578,28 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn dir_candidates_complete_partial_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        for d in ["alpha", "Alpine", "beta", ".hidden"] {
+            std::fs::create_dir(tmp.path().join(d)).unwrap();
+        }
+        std::fs::write(tmp.path().join("almanac.txt"), "").unwrap();
+        let base = format!("{}/", tmp.path().display());
+        assert_eq!(dir_candidates(&format!("{base}al")), ["alpha", "Alpine"]);
+        assert_eq!(dir_candidates(&base), ["alpha", "Alpine", "beta"]);
+        assert_eq!(dir_candidates(&format!("{base}.h")), [".hidden"]);
+        assert_eq!(parent_part(&format!("{base}al")), base);
+    }
+
+    #[test]
+    fn tilde_expands_only_as_home_prefix() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~/x"), PathBuf::from(format!("{home}/x")));
+        assert_eq!(expand_tilde("~other/x"), PathBuf::from("~other/x"));
+        assert_eq!(contract_tilde(&PathBuf::from(format!("{home}/x"))), "~/x");
     }
 
     fn app_with_empty_index() -> App {

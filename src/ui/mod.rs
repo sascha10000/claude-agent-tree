@@ -90,7 +90,7 @@ fn draw_statusbar(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(" · ⚓ hooks", Style::default().fg(Color::Green)));
     }
     let hints = match app.view {
-        View::Browse => "  j/k move · enter open · / filter · s sort · a stats · A active · f fleet · n new · R resume · w goto · ? help ",
+        View::Browse => "  j/k move · enter open · / filter · s sort · a stats · A active · f fleet · n new · N new in dir · R resume · w goto · ? help ",
         View::Detail => "  / search · e error · T think · o order · O full · c cost · t lanes · x export · R resume · w goto · ^n tabs · ? help ",
         View::Terminal => "  keys go to claude · ctrl-n tabs · ctrl-q detach (keeps running) ",
     };

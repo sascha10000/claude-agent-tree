@@ -21,7 +21,61 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         }
         Overlay::Fleet { selected } => draw_fleet(frame, app, *selected, centered(area, 84, 60)),
         Overlay::ConfirmQuit { running } => draw_confirm_quit(frame, *running, area),
+        Overlay::NewProject { input, selected } => {
+            draw_new_project(frame, app, input, *selected, centered(area, 70, 60))
+        }
     }
+}
+
+fn draw_new_project(frame: &mut Frame, app: &App, input: &str, selected: usize, area: Rect) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let candidates = crate::app::dir_candidates(input);
+    let target = std::fs::canonicalize(crate::app::expand_tilde(input.trim())).ok();
+    // Tell up front whether Enter joins an existing project or creates one.
+    let existing = target.as_ref().and_then(|t| {
+        app.index.projects.iter().find(|p| {
+            p.working_dir().and_then(|d| std::fs::canonicalize(d).ok()).as_ref() == Some(t)
+        })
+    });
+    let hint = match (&target, existing) {
+        (_, Some(p)) => Span::styled(format!(" → existing project {}", p.name()), Style::default().fg(Color::Green)),
+        (Some(_), None) => Span::styled(" → new project in this directory", Style::default().fg(Color::Cyan)),
+        (None, None) => Span::styled(" → directory will be created", Style::default().fg(Color::Yellow)),
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" > ", Style::default().fg(Color::Cyan)),
+            Span::raw(input),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(hint),
+        Line::raw(""),
+    ];
+    let rows = area.height.saturating_sub(6) as usize;
+    let start = selected.saturating_sub(rows.saturating_sub(1));
+    for (i, dir) in candidates.iter().enumerate().skip(start).take(rows) {
+        let style = if i == selected {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(format!("   {dir}/"), style)));
+    }
+    if candidates.is_empty() {
+        lines.push(Line::from(Span::styled("   (no subdirectories)", dim)));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" New session in directory ")
+        .title_bottom(Line::from(Span::styled(
+            " tab complete · ↑/↓ pick · enter start · esc cancel ",
+            dim,
+        )))
+        .border_style(Style::default().fg(Color::Cyan));
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_confirm_quit(frame: &mut Frame, running: usize, area: Rect) {
@@ -183,6 +237,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             ("f", "fleet: recently active sessions"),
             ("A", "only projects running / awaiting input"),
             ("n", "new claude session in the selected project"),
+            ("N", "new session in any directory (new or existing project)"),
             ("R", "resume session via claude --resume"),
             ("w", "go to the session: embedded terminal or its tmux pane"),
             ("r", "rescan"),

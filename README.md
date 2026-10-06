@@ -115,6 +115,7 @@ Laufende Sessions übernehmen neue Hooks erst nach einem Neustart.
 | `f` | Browse: Fleet-Overlay (in den letzten 5 min aktive Sessions, enter = hinspringen) |
 | `/` | Browse: Sessions filtern; Detail: Timeline durchsuchen |
 | `n` | Browse: neue, leere `claude`-Session im Verzeichnis des gewählten Projekts (eingebettetes Terminal) |
+| `N` | Browse: Verzeichnis wählen (Tab vervollständigt) und dort eine neue Session starten; existiert dort schon ein Projekt, wird es ausgewählt, sonst entsteht ein neues (fehlende Ordner werden angelegt) |
 | `n` / `N` | Detail: nächster / voriger Suchtreffer |
 | `e` | Detail: zum nächsten Fehler/Denied springen |
 | `T` | Detail: Thinking-Blöcke ein-/ausblenden |

@@ -1,4 +1,4 @@
-//! Session tab bar shown above Detail and Terminal: every running/waiting
+//! Session tab bar shown above every view: every running/waiting
 //! session with its status; Ctrl-n focuses it for switching, which unfolds
 //! it into a vertical list (one row per tab) until focus leaves again.
 

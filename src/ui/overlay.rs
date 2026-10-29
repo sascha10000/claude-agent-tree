@@ -225,7 +225,10 @@ fn draw_analytics(frame: &mut Frame, app: &App, scroll: usize, area: Rect) {
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let keys: &[(&str, &str)] = match app.view {
         // Unreachable (no overlays in the terminal view), but keep it total.
-        crate::app::View::Terminal => &[("ctrl-q", "detach; the session keeps running")],
+        crate::app::View::Terminal => &[
+            ("wheel, shift-PgUp/PgDn", "scroll back; any other key returns to live"),
+            ("ctrl-q", "detach; the session keeps running"),
+        ],
         crate::app::View::Browse => &[
             ("j/k ↓/↑", "move selection"),
             ("g / G", "first / last"),
@@ -240,6 +243,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             ("N", "new session in any directory (new or existing project)"),
             ("R", "resume session via claude --resume"),
             ("w", "go to the session: embedded terminal or its tmux pane"),
+            ("ctrl-n", "session tabs: ↑/↓ pick · 1-9 / enter switch · esc"),
             ("r", "rescan"),
             ("?", "this help"),
             ("q", "quit"),

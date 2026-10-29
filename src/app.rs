@@ -47,7 +47,7 @@ const PANES_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 /// Rows the Terminal view loses to the tab bar (top) and status line (bottom).
 pub const CHROME_ROWS: u16 = 2;
 
-/// One entry of the session tab bar shown outside Browse.
+/// One entry of the session tab bar shown above every view.
 #[derive(Debug, Clone)]
 pub struct SessionTab {
     pub id: String,
@@ -394,16 +394,14 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent) {
         use crossterm::event::KeyModifiers;
-        // The tab bar sits above everything outside Browse, terminal included:
-        // Ctrl-n is the one chord the embedded claude never sees.
+        // The tab bar sits above every view, terminal included: Ctrl-n is the
+        // one chord the embedded claude never sees. Checked before Browse's
+        // plain `n` (new session), which ignores modifiers.
         if self.tabbar.is_some() {
             self.handle_tabbar_key(key);
             return;
         }
-        if self.view != View::Browse
-            && key.code == KeyCode::Char('n')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
+        if key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.focus_tabbar();
             return;
         }
@@ -1256,8 +1254,37 @@ impl App {
             self.view = View::Browse;
             return;
         };
-        if let Some(pty) = self.ptys.get_mut(&id) {
-            pty.send_key(key);
+        let Some(pty) = self.ptys.get_mut(&id) else { return };
+        // Shift+PgUp/PgDn page through our scrollback (as in most terminals).
+        if key.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+        {
+            let page = pty.rows().saturating_sub(1).max(1) as isize;
+            pty.scroll_by(if key.code == KeyCode::PageUp { page } else { -page });
+            return;
+        }
+        // Typing while scrolled back jumps to the live screen first, so you
+        // always see what the key does (e.g. answering a question).
+        if pty.scrollback() > 0 {
+            pty.scroll_by(isize::MIN);
+        }
+        pty.send_key(key);
+    }
+
+    /// Mouse wheel over the Terminal view scrolls its scrollback; mouse
+    /// reporting is only enabled while that view is shown (see main).
+    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::MouseEventKind;
+        if self.view != View::Terminal || self.tabbar.is_some() {
+            return;
+        }
+        let Some(pty) = self.term_session.as_deref().and_then(|id| self.ptys.get(id)) else {
+            return;
+        };
+        match mouse.kind {
+            MouseEventKind::ScrollUp => pty.scroll_by(3),
+            MouseEventKind::ScrollDown => pty.scroll_by(-3),
+            _ => {}
         }
     }
 
@@ -1797,8 +1824,18 @@ mod tests {
     #[test]
     fn tab_bar_focus_navigation_and_switch() {
         let mut app = app_with_live_sessions();
-        app.handle_key(ctrl('n')); // Browse: no tab bar there
+        // Browse has the bar too; Enter opens the tab, Esc only closes the bar.
+        app.handle_key(ctrl('n'));
+        assert_eq!(app.tabbar, Some(0));
+        app.handle_key(key(KeyCode::Esc));
         assert!(app.tabbar.is_none());
+        assert_eq!(app.view, View::Browse);
+        app.handle_key(ctrl('n'));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.view, View::Detail);
+        assert_eq!(app.current_session_id(), Some("live"));
+        app.view = View::Browse;
 
         // Terminal view: Ctrl-n must be caught before keys go to the PTY.
         app.view = View::Terminal;

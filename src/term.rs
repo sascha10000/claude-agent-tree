@@ -13,6 +13,10 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 
 use crate::watch::AppEvent;
 
+/// Lines kept above the visible screen, so the pane can be scrolled back
+/// without going through claude's own (raw-looking) ctrl-o transcript.
+const SCROLLBACK_LINES: usize = 10_000;
+
 pub struct PtySession {
     parser: Arc<Mutex<vt100::Parser>>,
     writer: Box<dyn Write + Send>,
@@ -48,7 +52,7 @@ impl PtySession {
         // The slave fd must be dropped in the parent or reads never see EOF.
         drop(pty.slave);
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK_LINES)));
         let writer = pty.master.take_writer()?;
         let mut reader = pty.master.try_clone_reader()?;
         let last_output = Arc::new(Mutex::new(Instant::now()));
@@ -84,6 +88,25 @@ impl PtySession {
     /// Did the child write output within `window`? (= claude is busy drawing.)
     pub fn output_within(&self, window: Duration) -> bool {
         self.last_output.lock().expect("ts lock").elapsed() < window
+    }
+
+    /// How many lines the view is scrolled back (0 = following live output).
+    pub fn scrollback(&self) -> usize {
+        self.parser().screen().scrollback()
+    }
+
+    /// Scroll the view by `lines` (positive = back in history); vt100 clamps
+    /// to the available scrollback and keeps the offset pinned as output
+    /// arrives, so reading isn't yanked away by a busy child.
+    pub fn scroll_by(&self, lines: isize) {
+        let mut parser = self.parser();
+        let current = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(current.saturating_add_signed(lines));
+    }
+
+    /// Visible rows of the child's screen (one "page" when scrolling).
+    pub fn rows(&self) -> u16 {
+        self.parser().screen().size().0
     }
 
     pub fn send_key(&mut self, key: KeyEvent) {

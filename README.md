@@ -105,8 +105,9 @@ Running sessions only pick up new hooks after a restart.
 | `t` | Detail: show the Agents pane as time lanes (parallel agents become visible) |
 | `R` | open the session via `claude --resume` in an embedded terminal (Browse + Detail) |
 | `w` | jump to the session: its embedded terminal or its tmux pane (Browse + Detail) |
+| mouse wheel, `shift-PgUp/PgDn` | scroll back through the session's output (10k lines); any other key jumps back to live |
 | `ctrl-q` | leave the terminal view — the session keeps running in the background |
-| `ctrl-n` | Detail + Terminal: focus the session tab bar at the top (all running/waiting sessions with status); `←`/`→` select, `1`–`9` or `enter` switch, `esc` back. Embedded sessions open their terminal, others the Detail view |
+| `ctrl-n` | any view: focus the session tab bar at the top (all running/waiting sessions with status); `←`/`→` select, `1`–`9` or `enter` switch, `esc` back. Embedded sessions open their terminal, others the Detail view |
 | `s` | Browse: cycle sort order (mtime/cost/size/duration) |
 | `a` | Browse: analytics overlay (cost/tokens across all projects) |
 | `A` | Browse: only show projects with a running / waiting session (toggle) |

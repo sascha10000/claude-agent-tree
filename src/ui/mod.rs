@@ -15,9 +15,9 @@ use ratatui::Frame;
 use crate::app::{Activity, App, View};
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    // Outside Browse a session tab bar sits on top (Browse already lists them);
-    // while focused it unfolds into a vertical list, one row per tab.
-    let tab_rows = if app.view == View::Browse { 0 } else { tabs::height(app, frame.area().height) };
+    // A session tab bar sits on top of every view; while focused it unfolds
+    // into a vertical list, one row per tab.
+    let tab_rows = tabs::height(app, frame.area().height);
     let [tab_bar, main, status] = *Layout::vertical([
         Constraint::Length(tab_rows),
         Constraint::Min(0),
@@ -91,9 +91,9 @@ fn draw_statusbar(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(" · ⚓ hooks", Style::default().fg(Color::Green)));
     }
     let hints = match app.view {
-        View::Browse => "  j/k move · enter open · / filter · s sort · a stats · A active · f fleet · n new · N new in dir · R resume · w goto · ? help ",
+        View::Browse => "  j/k move · enter open · / filter · s sort · a stats · A active · f fleet · n new · N new in dir · R resume · w goto · ^n tabs · ? help ",
         View::Detail => "  / search · e error · T think · o order · O full · c cost · t lanes · x export · R resume · w goto · ^n tabs · ? help ",
-        View::Terminal => "  keys go to claude · ctrl-n tabs · ctrl-q detach (keeps running) ",
+        View::Terminal => "  keys go to claude · wheel/shift-pgup scroll · ctrl-n tabs · ctrl-q detach ",
     };
     spans.push(Span::styled(hints, Style::default().fg(Color::DarkGray)));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

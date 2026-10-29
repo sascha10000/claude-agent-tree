@@ -107,6 +107,7 @@ fn run_tui(root: PathBuf) -> Result<()> {
 
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, &mut app, rx);
+    set_mouse_reporting(false);
     ratatui::restore();
     result
 }
@@ -116,7 +117,15 @@ fn event_loop(
     app: &mut App,
     rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
+    let mut mouse_on = false;
     loop {
+        // Wheel events are only wanted for the embedded terminal's scrollback;
+        // elsewhere leave the mouse alone so native text selection works.
+        let want_mouse = app.view == app::View::Terminal;
+        if want_mouse != mouse_on {
+            set_mouse_reporting(want_mouse);
+            mouse_on = want_mouse;
+        }
         terminal.draw(|frame| ui::draw(frame, app))?;
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(event) => {
@@ -136,6 +145,17 @@ fn event_loop(
     Ok(())
 }
 
+/// Toggle button-only mouse reporting (1000, SGR-encoded via 1006). Unlike
+/// crossterm's EnableMouseCapture this skips motion tracking, so hovering
+/// doesn't flood the loop with redraws.
+fn set_mouse_reporting(on: bool) {
+    use std::io::Write;
+    let seq: &[u8] = if on { b"\x1b[?1000h\x1b[?1006h" } else { b"\x1b[?1006l\x1b[?1000l" };
+    let mut out = std::io::stdout();
+    let _ = out.write_all(seq);
+    let _ = out.flush();
+}
+
 fn handle_event(app: &mut App, event: AppEvent) {
     match event {
         AppEvent::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => {
@@ -147,6 +167,7 @@ fn handle_event(app: &mut App, event: AppEvent) {
             // Embedded terminals track the pane size (frame minus tab bar and statusbar).
             app.resize_ptys(cols, rows.saturating_sub(app::CHROME_ROWS));
         }
+        AppEvent::Input(Event::Mouse(mouse)) => app.handle_mouse(mouse),
         AppEvent::Input(_) => {} // other events: the redraw is enough
         AppEvent::Fs(paths) => {
             if let Some(events) = app.hooks.path().map(Path::to_path_buf)

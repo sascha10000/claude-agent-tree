@@ -82,6 +82,20 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(Paragraph::new(lines), area);
 
+    // Scrolled back: badge in the top-right corner, and no cursor (its
+    // position refers to the live screen, not the rows shown).
+    let offset = screen.scrollback();
+    if offset > 0 {
+        let badge = format!(" ↑ {offset} lines · wheel/Shift+PgDn · any key returns ");
+        let width = (badge.chars().count() as u16).min(area.width);
+        let badge_area = Rect::new(area.right() - width, area.y, width, 1);
+        frame.render_widget(
+            Paragraph::new(Span::styled(badge, Style::default().fg(Color::Black).bg(Color::Yellow))),
+            badge_area,
+        );
+        return;
+    }
+
     if !screen.hide_cursor() {
         let (cur_row, cur_col) = screen.cursor_position();
         if cur_row < area.height && cur_col < area.width {
